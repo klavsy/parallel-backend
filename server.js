@@ -16,24 +16,26 @@ if (!process.env.HUGGINGFACE_TOKEN) {
 
 console.log("✅ HUGGINGFACE_TOKEN loaded");
 
+// Model served via HuggingFace Inference Providers (router).
+// You can swap this for another chat model available on the router.
+const MODEL = process.env.HF_MODEL || "meta-llama/Llama-3.1-8B-Instruct";
+
 function extractJSON(text) {
     try {
-        // Remove markdown ```json and ```
         const cleaned = text
             .replace(/```json/g, "")
             .replace(/```/g, "")
             .trim();
-        
+
         const start = cleaned.indexOf("[");
         const end = cleaned.lastIndexOf("]") + 1;
-        
+
         if (start === -1 || end === 0) {
             console.error("❌ No JSON array found in response");
             return null;
         }
-        
-        const jsonStr = cleaned.slice(start, end);
-        return JSON.parse(jsonStr);
+
+        return JSON.parse(cleaned.slice(start, end));
     } catch (e) {
         console.error("❌ JSON parse failed:", e.message);
         return null;
@@ -50,7 +52,6 @@ app.post("/generate", async (req, res) => {
 
         const { name, interests, situation, decision, details } = req.body;
 
-        // Validate input
         if (!name || !interests || !situation || !decision || !details) {
             return res.status(400).json({
                 error: "Missing required fields",
@@ -58,48 +59,30 @@ app.post("/generate", async (req, res) => {
             });
         }
 
-        const prompt = `You are a creative storyteller. Generate 3 alternate life scenarios as JSON.
+        const prompt = `You are a creative storyteller. Based on this person's details, generate exactly 3 alternate-universe life scenarios showing what could happen if they made different choices.
 
-Return ONLY this JSON format (no markdown, no text before or after):
-[
-  {
-    "title": "short title",
-    "subtitle": "one line description",
-    "description": "2-3 sentences",
-    "careerPath": "career choice",
-    "keyEvents": ["event1", "event2", "event3"],
-    "outcome": "result"
-  },
-  {
-    "title": "short title",
-    "subtitle": "one line description",
-    "description": "2-3 sentences",
-    "careerPath": "career choice",
-    "keyEvents": ["event1", "event2", "event3"],
-    "outcome": "result"
-  },
-  {
-    "title": "short title",
-    "subtitle": "one line description",
-    "description": "2-3 sentences",
-    "careerPath": "career choice",
-    "keyEvents": ["event1", "event2", "event3"],
-    "outcome": "result"
-  }
-]
+Return ONLY a valid JSON array of exactly 3 objects. No markdown, no commentary, no text before or after — just the raw JSON array.
+
+Each object MUST have these exact keys:
+- "title": short catchy universe name (string)
+- "subtitle": one short line describing the path (string)
+- "description": 2-3 sentence story of this universe (string)
+- "careerPath": the career they pursued (string)
+- "keyEvents": array of 3-4 short strings (major milestones)
+- "outcome": where they ended up (string)
 
 Person: ${name}
 Interests: ${interests}
 Current Situation: ${situation}
-Decision: ${decision}
+Big Decision: ${decision}
 Details: ${details}
 
-Create 3 diverse universes (optimistic, realistic, cautionary). Output ONLY the JSON array:`;
+Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 steady/cautionary. Output ONLY the JSON array.`;
 
-        console.log("🔄 Calling HuggingFace API...");
+        console.log("🔄 Calling HuggingFace router with model:", MODEL);
 
         const response = await fetch(
-            "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.1",
+            "https://router.huggingface.co/v1/chat/completions",
             {
                 method: "POST",
                 headers: {
@@ -107,65 +90,54 @@ Create 3 diverse universes (optimistic, realistic, cautionary). Output ONLY the 
                     "Content-Type": "application/json"
                 },
                 body: JSON.stringify({
-                    inputs: prompt,
-                    parameters: {
-                        max_new_tokens: 1500,
-                        temperature: 0.7,
-                        top_p: 0.9
-                    }
+                    model: MODEL,
+                    messages: [
+                        {
+                            role: "system",
+                            content: "You are a precise JSON generator. You only output valid JSON arrays with no extra text."
+                        },
+                        { role: "user", content: prompt }
+                    ],
+                    max_tokens: 1500,
+                    temperature: 0.8
                 })
             }
         );
 
-        console.log("📤 HuggingFace API status:", response.status);
+        console.log("📤 HuggingFace status:", response.status);
 
         if (!response.ok) {
             const errorData = await response.text();
-            console.error("❌ HuggingFace API error:", response.status, errorData.slice(0, 200));
+            console.error("❌ HuggingFace error:", response.status, errorData.slice(0, 300));
             return res.status(500).json({
                 error: `HuggingFace API error: ${response.status}`,
-                details: errorData.slice(0, 200)
+                details: errorData.slice(0, 300)
             });
         }
 
         const data = await response.json();
         console.log("📦 HuggingFace response received");
 
-        // HuggingFace returns an array with { generated_text: "..." }
-        let text = null;
-
-        if (Array.isArray(data) && data[0]?.generated_text) {
-            text = data[0].generated_text;
-        } else if (data.generated_text) {
-            text = data.generated_text;
-        }
+        // Router endpoint is OpenAI-compatible: choices[0].message.content
+        const text = data?.choices?.[0]?.message?.content;
 
         if (!text) {
-            console.error("❌ No text in HuggingFace response:", JSON.stringify(data).slice(0, 200));
+            console.error("❌ No text in response:", JSON.stringify(data).slice(0, 300));
             return res.status(500).json({
                 error: "No text returned from HuggingFace",
                 raw: data
             });
         }
 
-        console.log("📝 Extracted text length:", text.length);
+        console.log("📝 Raw response start:", text.slice(0, 150));
 
-        // Parse JSON from text
         const parsed = extractJSON(text);
 
-        if (!parsed) {
-            console.error("❌ Failed to parse JSON from text");
+        if (!parsed || !Array.isArray(parsed)) {
+            console.error("❌ Failed to parse JSON. Raw:", text.slice(0, 300));
             return res.status(500).json({
                 error: "Failed to parse JSON response",
                 rawText: text.slice(0, 300)
-            });
-        }
-
-        if (!Array.isArray(parsed)) {
-            console.error("❌ Parsed result is not an array:", typeof parsed);
-            return res.status(500).json({
-                error: "Response is not an array",
-                type: typeof parsed
             });
         }
 
@@ -176,7 +148,6 @@ Create 3 diverse universes (optimistic, realistic, cautionary). Output ONLY the 
     } catch (err) {
         console.error("❌ Server error:", err.message);
         console.error(err.stack);
-        
         res.status(500).json({
             error: "Server error",
             message: err.message
