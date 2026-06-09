@@ -17,8 +17,47 @@ if (!process.env.HUGGINGFACE_TOKEN) {
 console.log("✅ HUGGINGFACE_TOKEN loaded");
 
 // Model served via HuggingFace Inference Providers (router).
-// You can swap this for another chat model available on the router.
 const MODEL = process.env.HF_MODEL || "meta-llama/Llama-3.1-8B-Instruct";
+
+// Supported output languages
+const LANGUAGES = {
+    en: "English",
+    sq: "Albanian",
+    eu: "Basque",
+    bs: "Bosnian",
+    bg: "Bulgarian",
+    ca: "Catalan",
+    hr: "Croatian",
+    cs: "Czech",
+    da: "Danish",
+    nl: "Dutch",
+    et: "Estonian",
+    fi: "Finnish",
+    fr: "French",
+    gl: "Galician",
+    de: "German",
+    el: "Greek",
+    hu: "Hungarian",
+    is: "Icelandic",
+    ga: "Irish",
+    it: "Italian",
+    lv: "Latvian",
+    lt: "Lithuanian",
+    lb: "Luxembourgish",
+    mk: "Macedonian",
+    mt: "Maltese",
+    no: "Norwegian",
+    pl: "Polish",
+    pt: "Portuguese",
+    ro: "Romanian",
+    sr: "Serbian",
+    sk: "Slovak",
+    sl: "Slovenian",
+    es: "Spanish",
+    sv: "Swedish",
+    tr: "Turkish",
+    cy: "Welsh"
+};
 
 function extractJSON(text) {
     try {
@@ -50,7 +89,7 @@ app.post("/generate", async (req, res) => {
     try {
         console.log("📥 Received request");
 
-        const { name, interests, situation, decision, details } = req.body;
+        const { name, interests, situation, decision, details, lang } = req.body;
 
         if (!name || !interests || !situation || !decision || !details) {
             return res.status(400).json({
@@ -59,11 +98,15 @@ app.post("/generate", async (req, res) => {
             });
         }
 
+        // Resolve language (default English)
+        const languageName = LANGUAGES[lang] || "English";
+        console.log("🌐 Output language:", languageName);
+
         const prompt = `You are a creative storyteller. Based on this person's details, generate exactly 3 alternate-universe life scenarios showing what could happen if they made different choices.
 
 Return ONLY a valid JSON array of exactly 3 objects. No markdown, no commentary, no text before or after — just the raw JSON array.
 
-Each object MUST have these exact keys:
+Each object MUST have these exact keys (keys stay in English):
 - "title": short catchy universe name (string)
 - "subtitle": one short line describing the path (string)
 - "description": 2-3 sentence story of this universe (string)
@@ -71,13 +114,15 @@ Each object MUST have these exact keys:
 - "keyEvents": array of 3-4 short strings (major milestones)
 - "outcome": where they ended up (string)
 
+VERY IMPORTANT: Write ALL string VALUES (title, subtitle, description, careerPath, every keyEvents item, and outcome) in ${languageName}. The JSON keys must remain exactly in English as listed above. Do not translate the keys.
+
 Person: ${name}
 Interests: ${interests}
 Current Situation: ${situation}
 Big Decision: ${decision}
 Details: ${details}
 
-Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 steady/cautionary. Output ONLY the JSON array.`;
+Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 steady/cautionary. Output ONLY the JSON array, with all values written in ${languageName}.`;
 
         console.log("🔄 Calling HuggingFace router with model:", MODEL);
 
@@ -94,7 +139,7 @@ Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 stead
                     messages: [
                         {
                             role: "system",
-                            content: "You are a precise JSON generator. You only output valid JSON arrays with no extra text."
+                            content: `You are a precise JSON generator. You only output valid JSON arrays with no extra text. All string values must be written in ${languageName}, but JSON keys must stay in English.`
                         },
                         { role: "user", content: prompt }
                     ],
