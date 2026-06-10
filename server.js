@@ -104,6 +104,48 @@ app.get("/health", (req, res) => {
     res.json({ status: "ok" });
 });
 
+// Diagnostic: open this URL in a browser to test Azure Speech end-to-end.
+// Never exposes the key itself.
+app.get("/speak-test", async (req, res) => {
+    if (!SPEECH_KEY || !SPEECH_REGION) {
+        return res.json({
+            ok: false,
+            reason: "Env vars missing or empty",
+            keyPresent: !!SPEECH_KEY,
+            regionResolved: SPEECH_REGION || null
+        });
+    }
+    try {
+        const ssml = "<speak version='1.0' xml:lang='en-US'><voice name='en-US-JennyNeural'>test</voice></speak>";
+        const r = await fetch(
+            `https://${SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1`,
+            {
+                method: "POST",
+                headers: {
+                    "Ocp-Apim-Subscription-Key": SPEECH_KEY,
+                    "Content-Type": "application/ssml+xml",
+                    "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+                    "User-Agent": "ParallelUniverse"
+                },
+                body: ssml
+            }
+        );
+        if (!r.ok) {
+            const t = await r.text();
+            return res.json({
+                ok: false,
+                azureStatus: r.status,
+                details: t.slice(0, 200),
+                regionResolved: SPEECH_REGION
+            });
+        }
+        const buf = await r.arrayBuffer();
+        return res.json({ ok: true, regionResolved: SPEECH_REGION, audioBytes: buf.byteLength });
+    } catch (e) {
+        return res.json({ ok: false, reason: e.message, regionResolved: SPEECH_REGION });
+    }
+});
+
 // ===== Azure AI Speech: one neural voice per supported language =====
 // Note: Luxembourgish (lb) has no Azure voice yet → falls back to German.
 const VOICES = {
@@ -157,8 +199,8 @@ app.post("/speak", async (req, res) => {
             return res.status(400).json({ error: "Missing text" });
         }
 
-        // Cap length to protect the free tier
-        text = String(text).slice(0, 1000);
+        // Cap length: a full universe card is ~1500-2500 chars
+        text = String(text).slice(0, 3000);
 
         const voice = VOICES[lang] || VOICES.en;
         const xmlLang = voice.split("-").slice(0, 2).join("-");
