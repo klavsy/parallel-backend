@@ -16,6 +16,21 @@ if (!process.env.HUGGINGFACE_TOKEN) {
 
 console.log("✅ HUGGINGFACE_TOKEN loaded");
 
+// ===== Azure Speech config (normalized + diagnosed at startup) =====
+// Region must be the short id like "westeurope" — this normalization also
+// accepts "West Europe" or stray spaces and fixes them automatically.
+const SPEECH_KEY = (process.env.AZURE_SPEECH_KEY || "").trim();
+const SPEECH_REGION = (process.env.AZURE_SPEECH_REGION || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+
+if (SPEECH_KEY && SPEECH_REGION) {
+    console.log(`✅ Azure Speech configured (region: ${SPEECH_REGION})`);
+} else {
+    console.log("⚠️ Azure Speech NOT configured — narration disabled. Need env vars AZURE_SPEECH_KEY and AZURE_SPEECH_REGION (exact names).");
+}
+
 // Model served via HuggingFace Inference Providers (router).
 // Gemma 3 27B: 140+ language support (incl. Latvian and other Baltic/low-resource
 // European languages). Override with HF_MODEL env var without code changes.
@@ -130,7 +145,8 @@ const VOICES = {
 
 app.post("/speak", async (req, res) => {
     try {
-        if (!process.env.AZURE_SPEECH_KEY || !process.env.AZURE_SPEECH_REGION) {
+        if (!SPEECH_KEY || !SPEECH_REGION) {
+            console.warn("⚠️ /speak called but Azure Speech env vars are missing");
             return res.status(503).json({ error: "Speech not configured" });
         }
 
@@ -154,11 +170,11 @@ app.post("/speak", async (req, res) => {
         console.log("🔊 TTS request:", voice, "| chars:", text.length);
 
         const ttsRes = await fetch(
-            `https://${process.env.AZURE_SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1`,
+            `https://${SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1`,
             {
                 method: "POST",
                 headers: {
-                    "Ocp-Apim-Subscription-Key": process.env.AZURE_SPEECH_KEY,
+                    "Ocp-Apim-Subscription-Key": SPEECH_KEY,
                     "Content-Type": "application/ssml+xml",
                     "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
                     "User-Agent": "ParallelUniverse"
