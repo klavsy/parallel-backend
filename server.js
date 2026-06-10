@@ -17,13 +17,15 @@ if (!process.env.HUGGINGFACE_TOKEN) {
 console.log("✅ HUGGINGFACE_TOKEN loaded");
 
 // ===== Azure Speech config (normalized + diagnosed at startup) =====
-// Region must be the short id like "westeurope" — this normalization also
-// accepts "West Europe" or stray spaces and fixes them automatically.
+// Region must be the short id like "germanywestcentral". This normalization
+// also accepts "Germany West Central" or even a pasted endpoint URL like
+// "https://germanywestcentral.api.cognitive.microsoft.com/" and extracts
+// the region from it automatically.
 const SPEECH_KEY = (process.env.AZURE_SPEECH_KEY || "").trim();
-const SPEECH_REGION = (process.env.AZURE_SPEECH_REGION || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, "");
+let _rawRegion = (process.env.AZURE_SPEECH_REGION || "").trim().toLowerCase();
+const _urlMatch = _rawRegion.match(/^https?:\/\/([a-z0-9]+)\./);
+if (_urlMatch) _rawRegion = _urlMatch[1];
+const SPEECH_REGION = _rawRegion.replace(/[^a-z0-9]/g, "");
 
 if (SPEECH_KEY && SPEECH_REGION) {
     console.log(`✅ Azure Speech configured (region: ${SPEECH_REGION})`);
