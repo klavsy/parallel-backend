@@ -17,7 +17,9 @@ if (!process.env.HUGGINGFACE_TOKEN) {
 console.log("✅ HUGGINGFACE_TOKEN loaded");
 
 // Model served via HuggingFace Inference Providers (router).
-const MODEL = process.env.HF_MODEL || "meta-llama/Llama-3.1-8B-Instruct";
+// Gemma 3 27B: 140+ language support (incl. Latvian and other Baltic/low-resource
+// European languages). Override with HF_MODEL env var without code changes.
+const MODEL = process.env.HF_MODEL || "google/gemma-3-27b-it";
 
 // Supported output languages
 const LANGUAGES = {
@@ -85,6 +87,106 @@ app.get("/health", (req, res) => {
     res.json({ status: "ok" });
 });
 
+// ===== Azure AI Speech: one neural voice per supported language =====
+// Note: Luxembourgish (lb) has no Azure voice yet → falls back to German.
+const VOICES = {
+    en: "en-US-JennyNeural",
+    sq: "sq-AL-AnilaNeural",
+    eu: "eu-ES-AinhoaNeural",
+    bs: "bs-BA-VesnaNeural",
+    bg: "bg-BG-KalinaNeural",
+    ca: "ca-ES-JoanaNeural",
+    hr: "hr-HR-GabrijelaNeural",
+    cs: "cs-CZ-VlastaNeural",
+    da: "da-DK-ChristelNeural",
+    nl: "nl-NL-FennaNeural",
+    et: "et-EE-AnuNeural",
+    fi: "fi-FI-SelmaNeural",
+    fr: "fr-FR-DeniseNeural",
+    gl: "gl-ES-SabelaNeural",
+    de: "de-DE-KatjaNeural",
+    el: "el-GR-AthinaNeural",
+    hu: "hu-HU-NoemiNeural",
+    is: "is-IS-GudrunNeural",
+    ga: "ga-IE-OrlaNeural",
+    it: "it-IT-ElsaNeural",
+    lv: "lv-LV-EveritaNeural",
+    lt: "lt-LT-OnaNeural",
+    lb: "de-DE-KatjaNeural",
+    mk: "mk-MK-MarijaNeural",
+    mt: "mt-MT-GraceNeural",
+    no: "nb-NO-PernilleNeural",
+    pl: "pl-PL-ZofiaNeural",
+    pt: "pt-PT-RaquelNeural",
+    ro: "ro-RO-AlinaNeural",
+    sr: "sr-RS-SophieNeural",
+    sk: "sk-SK-ViktoriaNeural",
+    sl: "sl-SI-PetraNeural",
+    es: "es-ES-ElviraNeural",
+    sv: "sv-SE-SofieNeural",
+    tr: "tr-TR-EmelNeural",
+    cy: "cy-GB-NiaNeural"
+};
+
+app.post("/speak", async (req, res) => {
+    try {
+        if (!process.env.AZURE_SPEECH_KEY || !process.env.AZURE_SPEECH_REGION) {
+            return res.status(503).json({ error: "Speech not configured" });
+        }
+
+        let { text, lang } = req.body;
+        if (!text) {
+            return res.status(400).json({ error: "Missing text" });
+        }
+
+        // Cap length to protect the free tier
+        text = String(text).slice(0, 1000);
+
+        const voice = VOICES[lang] || VOICES.en;
+        const xmlLang = voice.split("-").slice(0, 2).join("-");
+        const escaped = text
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+
+        const ssml = `<speak version='1.0' xml:lang='${xmlLang}'><voice name='${voice}'>${escaped}</voice></speak>`;
+
+        console.log("🔊 TTS request:", voice, "| chars:", text.length);
+
+        const ttsRes = await fetch(
+            `https://${process.env.AZURE_SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1`,
+            {
+                method: "POST",
+                headers: {
+                    "Ocp-Apim-Subscription-Key": process.env.AZURE_SPEECH_KEY,
+                    "Content-Type": "application/ssml+xml",
+                    "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+                    "User-Agent": "ParallelUniverse"
+                },
+                body: ssml
+            }
+        );
+
+        if (!ttsRes.ok) {
+            const errText = await ttsRes.text();
+            console.error("❌ Azure Speech error:", ttsRes.status, errText.slice(0, 200));
+            return res.status(500).json({
+                error: `Azure Speech error: ${ttsRes.status}`,
+                details: errText.slice(0, 200)
+            });
+        }
+
+        const audioBuffer = Buffer.from(await ttsRes.arrayBuffer());
+        console.log("✅ TTS audio generated:", audioBuffer.length, "bytes");
+
+        res.set("Content-Type", "audio/mpeg").send(audioBuffer);
+
+    } catch (err) {
+        console.error("❌ /speak error:", err.message);
+        res.status(500).json({ error: "Speech server error", message: err.message });
+    }
+});
+
 app.post("/generate", async (req, res) => {
     try {
         console.log("📥 Received request");
@@ -102,7 +204,7 @@ app.post("/generate", async (req, res) => {
         const languageName = LANGUAGES[lang] || "English";
         console.log("🌐 Output language:", languageName);
 
-        const prompt = `You are a creative storyteller. Based on this person's details, generate exactly 3 alternate-universe life scenarios showing what could happen if they made different choices.
+        const prompt = `You are a creative storyteller and life advisor. Based on this person's details, generate exactly 3 alternate-universe life scenarios showing what could happen if they made different choices.
 
 Return ONLY a valid JSON array of exactly 3 objects. No markdown, no commentary, no text before or after — just the raw JSON array.
 
@@ -113,8 +215,14 @@ Each object MUST have these exact keys (keys stay in English):
 - "careerPath": the career they pursued (string)
 - "keyEvents": array of 3-4 short strings (major milestones)
 - "outcome": where they ended up (string)
+- "recommendations": object with exactly these keys:
+    - "jobRoles": array of 2-3 REAL job titles that exist on job boards today and fit this universe and the person's interests (short, searchable titles like "UX Designer" or "Data Analyst" — values in ${languageName} but keep titles recognizable/searchable)
+    - "travel": array of 1-2 objects, each {"place": "City, Country", "reason": "one short sentence why it fits this universe"} — real places relevant to this universe's lifestyle
+    - "food": array of 1-2 objects, each {"item": "specific dish or cuisine/restaurant type", "reason": "one short sentence tying it to this universe"}
 
-VERY IMPORTANT: Write ALL string VALUES (title, subtitle, description, careerPath, every keyEvents item, and outcome) in ${languageName}. The JSON keys must remain exactly in English as listed above. Do not translate the keys.
+The recommendations MUST be tailored to the person's specific interests, situation, and decision — not generic. Different universes should get different recommendations.
+
+VERY IMPORTANT: Write ALL string VALUES in ${languageName}. The JSON keys must remain exactly in English as listed above. Do not translate the keys. For "place" keep the city and country names in their commonly used ${languageName} forms.
 
 Person: ${name}
 Interests: ${interests}
@@ -136,14 +244,15 @@ Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 stead
                 },
                 body: JSON.stringify({
                     model: MODEL,
+                    // Gemma's chat template handles system roles inconsistently across
+                    // providers, so the instruction is folded into the user message.
                     messages: [
                         {
-                            role: "system",
-                            content: `You are a precise JSON generator. You only output valid JSON arrays with no extra text. All string values must be written in ${languageName}, but JSON keys must stay in English.`
-                        },
-                        { role: "user", content: prompt }
+                            role: "user",
+                            content: `You are a precise JSON generator. You only output valid JSON arrays with no extra text. All string values must be written in ${languageName}, but JSON keys must stay in English.\n\n${prompt}`
+                        }
                     ],
-                    max_tokens: 1500,
+                    max_tokens: 2800,
                     temperature: 0.8
                 })
             }
