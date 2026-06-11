@@ -123,6 +123,62 @@ if (AZURE_MAPS_KEY) {
     console.log("⚠️ Azure Maps NOT configured — map pinpointing disabled (set AZURE_MAPS_KEY)");
 }
 
+// ===== Foundry IQ (knowledge-grounded retrieval via Azure AI Search) =====
+// Microsoft IQ layer required by Agents League rules. A knowledge base on
+// Azure AI Search grounds the reality-check scores with retrieved facts.
+const FOUNDRY_IQ_ENDPOINT = (process.env.FOUNDRY_IQ_ENDPOINT || "").trim().replace(/\/+$/, "");
+const FOUNDRY_IQ_KEY = (process.env.FOUNDRY_IQ_KEY || "").trim();
+const FOUNDRY_IQ_KB = (process.env.FOUNDRY_IQ_KB || "").trim();
+const FOUNDRY_IQ_API_VERSION = (process.env.FOUNDRY_IQ_API_VERSION || "2026-04-01").trim();
+const IQ_CONFIGURED = !!(FOUNDRY_IQ_ENDPOINT && FOUNDRY_IQ_KEY && FOUNDRY_IQ_KB);
+if (IQ_CONFIGURED) {
+    console.log(`✅ Foundry IQ configured (knowledge base: ${FOUNDRY_IQ_KB})`);
+} else {
+    console.log("⚠️ Foundry IQ NOT configured — reality scores will be ungrounded (set FOUNDRY_IQ_ENDPOINT, FOUNDRY_IQ_KEY, FOUNDRY_IQ_KB)");
+}
+
+// Agentic retrieval against the Foundry IQ knowledge base. Hard 8s timeout
+// and defensive parsing — generation must never hang or fail because of IQ.
+async function retrieveKnowledge(query) {
+    if (!IQ_CONFIGURED) return "";
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+        const url = `${FOUNDRY_IQ_ENDPOINT}/knowledgebases/${encodeURIComponent(FOUNDRY_IQ_KB)}/retrieve?api-version=${FOUNDRY_IQ_API_VERSION}`;
+        const r = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "api-key": FOUNDRY_IQ_KEY },
+            body: JSON.stringify({
+                messages: [
+                    { role: "user", content: [{ type: "text", text: String(query).slice(0, 400) }] }
+                ]
+            }),
+            signal: controller.signal
+        });
+        if (!r.ok) {
+            const t = await r.text();
+            console.error("⚠️ Foundry IQ retrieve error:", r.status, t.slice(0, 200));
+            return "";
+        }
+        const data = await r.json();
+        let text = data?.response?.[0]?.content?.[0]?.text || "";
+        if (!text && Array.isArray(data?.references)) {
+            text = data.references
+                .map(ref => ref?.sourceData?.content || ref?.content || "")
+                .filter(Boolean)
+                .join("\n");
+        }
+        text = String(text).slice(0, 2500);
+        if (text) console.log(`🧠 Foundry IQ grounding retrieved (${text.length} chars)`);
+        return text;
+    } catch (err) {
+        console.error("⚠️ Foundry IQ unavailable:", err.name === "AbortError" ? "timeout (8s)" : err.message);
+        return "";
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 // Model served via HuggingFace Inference Providers (router).
 // Gemma 3 27B: 140+ language support (incl. Latvian and other Baltic/low-resource
 // European languages). Override with HF_MODEL env var without code changes.
@@ -214,6 +270,10 @@ function sanitizeUniverses(arr) {
             careerPath: s(u.careerPath, 200),
             keyEvents: sArr(u.keyEvents, 6, 240),
             outcome: s(u.outcome, 600),
+            realityScore: Number.isFinite(Number(u.realityScore))
+                ? Math.max(0, Math.min(100, Math.round(Number(u.realityScore))))
+                : null,
+            realityNote: s(u.realityNote, 200),
             recommendations: {
                 jobRoles: sArr(rec.jobRoles, 4, 80),
                 travel: objArr(rec.travel, 3, "place", "reason"),
@@ -374,6 +434,24 @@ app.post("/speak", speakLimiter, async (req, res) => {
 
 // Pinpoint real places: restaurants near the user, or cities/countries worldwide.
 // Uses Azure Maps fuzzy search (POIs + geographies in one API).
+// Diagnostics: verify the Foundry IQ knowledge base end to end
+app.get("/iq-test", speakLimiter, async (req, res) => {
+    if (!IQ_CONFIGURED) {
+        return res.status(503).json({
+            ok: false,
+            error: "Foundry IQ not configured",
+            need: ["FOUNDRY_IQ_ENDPOINT", "FOUNDRY_IQ_KEY", "FOUNDRY_IQ_KB"]
+        });
+    }
+    const sample = await retrieveKnowledge("career change feasibility and labor market outlook");
+    res.json({
+        ok: !!sample,
+        knowledgeBase: FOUNDRY_IQ_KB,
+        apiVersion: FOUNDRY_IQ_API_VERSION,
+        preview: sample ? sample.slice(0, 300) : "(empty — check the knowledge base has documents and the key/endpoint are correct; see Render logs for details)"
+    });
+});
+
 app.get("/places", mapsLimiter, async (req, res) => {
     try {
         if (!AZURE_MAPS_KEY) return res.status(503).json({ error: "Maps not configured" });
@@ -385,7 +463,15 @@ app.get("/places", mapsLimiter, async (req, res) => {
         const lon = parseFloat(req.query.lon);
         const limit = Math.min(parseInt(req.query.limit) || 1, 5);
 
+        // Precision: restrict the index set so destinations only match
+        // geographies (never a restaurant named "Italy") and food only
+        // matches points of interest (never a country).
+        const kind = req.query.kind === "geo" ? "Geo"
+            : req.query.kind === "poi" ? "POI"
+            : null;
+
         let url = `https://atlas.microsoft.com/search/fuzzy/json?api-version=1.0&query=${encodeURIComponent(query)}&limit=${limit}&subscription-key=${AZURE_MAPS_KEY}`;
+        if (kind) url += `&idxSet=${kind}`;
         const validCoords = !isNaN(lat) && !isNaN(lon) &&
             lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
         if (validCoords) {
@@ -482,6 +568,12 @@ app.post("/generate", generateLimiter, async (req, res) => {
         const languageName = LANGUAGES[lang] || "English";
         console.log("🌐 Output language:", languageName);
 
+        // Foundry IQ: retrieve grounding facts for this person's decision
+        // (returns "" instantly when not configured — never blocks)
+        const grounding = await retrieveKnowledge(
+            `${decision} — ${situation}; interests: ${interests}`
+        );
+
         const prompt = `You are a creative storyteller and life advisor. Based on this person's details, generate exactly 3 alternate-universe life scenarios showing what could happen if they made different choices.
 
 Return ONLY a valid JSON array of exactly 3 objects. No markdown, no commentary, no text before or after — just the raw JSON array.
@@ -493,12 +585,20 @@ Each object MUST have these exact keys (keys stay in English):
 - "careerPath": the career they pursued (string)
 - "keyEvents": array of 3-4 short strings (major milestones)
 - "outcome": where they ended up (string)
+- "realityScore": integer 0-100 — an honest, calibrated estimate of how achievable this specific path is for THIS person given their stated situation, skills and decision${'' /* grounding-aware note added below */}
+- "realityNote": one short sentence (max 25 words) justifying the score honestly
 - "recommendations": object with exactly these keys:
     - "jobRoles": array of 2-3 REAL job titles that exist on job boards today and fit this universe and the person's interests (short, searchable titles like "UX Designer" or "Data Analyst" — values in ${languageName} but keep titles recognizable/searchable)
     - "travel": array of 1-2 objects, each {"place": "City, Country", "reason": "one short sentence why it fits this universe"} — real places relevant to this universe's lifestyle
     - "food": array of 1-2 objects, each {"item": "specific dish or cuisine/restaurant type", "reason": "one short sentence tying it to this universe"}
 
 The recommendations MUST be tailored to the person's specific interests, situation, and decision — not generic. Different universes should get different recommendations.
+
+realityScore rules: be honest, not flattering — bold paths usually score lower than steady ones; the three universes must NOT share the same score; base it on the person's actual starting point${"" + (grounding ? " AND on the grounding facts below" : "")}.
+${grounding ? `Grounding facts retrieved from the Foundry IQ knowledge base (use them to calibrate realityScore, realityNote and recommendations; do not cite sources):
+<knowledge>
+${grounding}
+</knowledge>` : ""}
 
 VERY IMPORTANT: Write ALL string VALUES in ${languageName}. The JSON keys must remain exactly in English as listed above. Do not translate the keys. For "place" keep the city and country names in their commonly used ${languageName} forms.
 
