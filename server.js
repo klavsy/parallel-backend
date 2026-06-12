@@ -148,11 +148,10 @@ async function retrieveKnowledge(query) {
         const r = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json", "api-key": FOUNDRY_IQ_KEY },
+            
             body: JSON.stringify({
-                messages: [
-                    { role: "user", content: [{ type: "text", text: String(query).slice(0, 400) }] }
-                ]
-            }),
+    query: String(query).slice(0, 400)
+}),
             signal: controller.signal
         });
         if (!r.ok) {
