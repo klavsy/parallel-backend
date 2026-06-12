@@ -246,6 +246,48 @@ function extractJSON(text) {
     }
 }
 
+// Language-agnostic gibberish detector (safe for all 36 UI languages —
+// uses Unicode letter classes and a broad vowel set covering Latin
+// diacritics, Greek and Cyrillic). Blocks keyboard mashing without
+// blocking real words in any supported language.
+function looksLikeGibberish(text) {
+    const raw = String(text || "").trim();
+    if (!raw) return false;
+    const lower = raw.toLowerCase();
+    let letters = "";
+    for (const ch of lower) if (/\p{L}/u.test(ch)) letters += ch;
+    if (letters.length < 6) return false; // too short to judge fairly
+
+    const VOWELS = "aeiouyàáâãäåāăąèéêëēĕėęěìíîïĩīĭįòóôõöōŏőøùúûüũūŭůűųýÿæœαεηιοωυаеёиіїоуыэюяє";
+    let vowels = 0;
+    for (const ch of letters) if (VOWELS.includes(ch)) vowels++;
+    const vowelRatio = vowels / letters.length;
+    const diversity = new Set(letters).size / letters.length;
+    const hasSpace = /\s/.test(raw);
+
+    // Critical signals — any one blocks
+    if (/(\p{L})\1{4,}/u.test(lower)) return true; // "kkkkkk"
+    const SEQS = ["qwert", "werty", "ertyu", "asdf", "sdfg", "dfgh", "fghj", "ghjk", "hjkl", "zxcv", "xcvb", "cvbn", "vbnm", "yxcv", "azert", "qsdf"];
+    let seqHits = 0;
+    for (const s of SEQS) seqHits += lower.split(s).length - 1;
+    if (seqHits >= 2) return true; // "qwerty", "asdfasdf"
+    if (vowels === 0 && letters.length >= 9 && !hasSpace) return true; // "sdjkfhskjdfh"
+
+    // Weak signals — two or more block
+    let maxRun = 0, run = 0;
+    for (const ch of lower) {
+        if (/\p{L}/u.test(ch) && !VOWELS.includes(ch)) { run++; if (run > maxRun) maxRun = run; }
+        else run = 0;
+    }
+    let signals = 0;
+    if (vowelRatio < 0.18 && letters.length >= 10) signals++;
+    if (diversity < 0.25 && letters.length >= 10) signals++;
+    if (maxRun >= 7) signals++;
+    if (seqHits === 1) signals++;
+    if (raw.length >= 50 && !hasSpace) signals++;
+    return signals >= 2;
+}
+
 // Whitelist + cap every field the AI returns. Unknown keys are dropped,
 // types are coerced to strings, arrays are bounded — the frontend never
 // receives an unexpected shape even if the model is prompt-injected.
@@ -564,15 +606,30 @@ app.post("/generate", generateLimiter, async (req, res) => {
             });
         }
 
+        // Block keyboard-mash inputs before spending AI tokens on them
+        const fieldEntries = { name, interests, situation, decision, details };
+        for (const [fieldName, value] of Object.entries(fieldEntries)) {
+            if (looksLikeGibberish(value)) {
+                console.log(`🚫 Gibberish blocked in "${fieldName}"`);
+                return res.status(400).json({
+                    error: "Input looks like random characters — please use real words",
+                    code: "gibberish",
+                    field: fieldName
+                });
+            }
+        }
+
         // Resolve language (default English)
         const languageName = LANGUAGES[lang] || "English";
         console.log("🌐 Output language:", languageName);
 
         // Foundry IQ: retrieve grounding facts for this person's decision
         // (returns "" instantly when not configured — never blocks)
+        const tIq = Date.now();
         const grounding = await retrieveKnowledge(
             `${decision} — ${situation}; interests: ${interests}`
         );
+        const iqMs = Date.now() - tIq;
 
         const prompt = `You are a creative storyteller and life advisor. Based on this person's details, generate exactly 3 alternate-universe life scenarios showing what could happen if they made different choices.
 
@@ -648,6 +705,7 @@ Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 stead
             console.log("🔄 Calling HuggingFace router with model:", MODEL);
         }
 
+        const tModel = Date.now();
         const response = await fetch(apiUrl, {
             method: "POST",
             headers: apiHeaders,
@@ -699,7 +757,18 @@ Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 stead
         const universes = sanitizeUniverses(parsed);
         console.log("✅ Success! Generated", universes.length, "universes");
 
-        res.json({ universes });
+        // Real pipeline telemetry — shown to the user as a transparency strip
+        res.json({
+            universes,
+            meta: {
+                grounded: !!grounding,
+                iqMs: grounding ? iqMs : 0,
+                model: (USE_FOUNDRY ? AZURE_AI_DEPLOYMENT : MODEL).split("/").pop(),
+                provider: providerName,
+                modelMs: Date.now() - tModel,
+                count: universes.length
+            }
+        });
 
     } catch (err) {
         console.error("❌ Server error:", err.message);
