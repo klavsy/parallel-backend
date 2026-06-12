@@ -12,10 +12,14 @@ app.set("trust proxy", 1);
 // CORS: lock to your frontend by setting ALLOWED_ORIGINS (comma-separated,
 // e.g. "https://your-app.vercel.app"). Defaults to open so nothing breaks
 // before you set it.
+// Forgiving parsing: "parallel-hazel.vercel.app" works the same as
+// "https://parallel-hazel.vercel.app/" — browsers send full origins,
+// so we normalize what the user typed to match.
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
     .split(",")
-    .map(s => s.trim())
-    .filter(Boolean);
+    .map(s => s.trim().toLowerCase().replace(/\/+$/, ""))
+    .filter(Boolean)
+    .map(o => /^https?:\/\//.test(o) ? o : "https://" + o);
 
 app.use(cors({
     origin: ALLOWED_ORIGINS.length
@@ -90,9 +94,9 @@ if (STORY_PROVIDER === "foundry" && !FOUNDRY_CONFIGURED) {
 }
 if (USE_FOUNDRY) {
     console.log(`✅ Story AI: Azure AI Foundry (deployment: ${AZURE_AI_DEPLOYMENT})`);
-    if (HF_TOKEN) console.log("ℹ️ Gemma 3 via Hugging Face stays available — set STORY_PROVIDER=hf to use it");
+    if (HF_TOKEN) console.log("ℹ️ Hugging Face model stays available — set STORY_PROVIDER=hf to use it");
 } else if (HF_TOKEN) {
-    console.log("✅ Story AI: Gemma 3 via Hugging Face router" + (FOUNDRY_CONFIGURED ? " (Foundry integrated — set STORY_PROVIDER=foundry to switch)" : ""));
+    console.log(`✅ Story AI: ${MODEL} via Hugging Face router` + (FOUNDRY_CONFIGURED ? " (Foundry integrated — set STORY_PROVIDER=foundry to switch)" : ""));
 } else {
     console.error("❌ No story AI configured! Set AZURE_AI_ENDPOINT + AZURE_AI_KEY + AZURE_AI_DEPLOYMENT, or HUGGINGFACE_TOKEN.");
     process.exit(1);
@@ -126,39 +130,53 @@ if (AZURE_MAPS_KEY) {
 // ===== Foundry IQ (knowledge-grounded retrieval via Azure AI Search) =====
 // Microsoft IQ layer required by Agents League rules. A knowledge base on
 // Azure AI Search grounds the reality-check scores with retrieved facts.
-const FOUNDRY_IQ_ENDPOINT = (process.env.FOUNDRY_IQ_ENDPOINT || "").trim().replace(/\/+$/, "");
+let FOUNDRY_IQ_ENDPOINT = (process.env.FOUNDRY_IQ_ENDPOINT || "").trim();
+try {
+    if (FOUNDRY_IQ_ENDPOINT) FOUNDRY_IQ_ENDPOINT = new URL(FOUNDRY_IQ_ENDPOINT).origin;
+} catch (_) {
+    FOUNDRY_IQ_ENDPOINT = FOUNDRY_IQ_ENDPOINT.replace(/\/+$/, "");
+}
+const IQ_ENDPOINT_LOOKS_RIGHT = FOUNDRY_IQ_ENDPOINT.includes(".search.windows.net");
 const FOUNDRY_IQ_KEY = (process.env.FOUNDRY_IQ_KEY || "").trim();
 const FOUNDRY_IQ_KB = (process.env.FOUNDRY_IQ_KB || "").trim();
 const FOUNDRY_IQ_API_VERSION = (process.env.FOUNDRY_IQ_API_VERSION || "2026-04-01").trim();
 const IQ_CONFIGURED = !!(FOUNDRY_IQ_ENDPOINT && FOUNDRY_IQ_KEY && FOUNDRY_IQ_KB);
 if (IQ_CONFIGURED) {
     console.log(`✅ Foundry IQ configured (knowledge base: ${FOUNDRY_IQ_KB})`);
+    if (!IQ_ENDPOINT_LOOKS_RIGHT) {
+        console.log("⚠️ FOUNDRY_IQ_ENDPOINT doesn't look like an Azure AI Search URL (expected https://<name>.search.windows.net) — you may have pasted the Foundry endpoint instead");
+    }
 } else {
     console.log("⚠️ Foundry IQ NOT configured — reality scores will be ungrounded (set FOUNDRY_IQ_ENDPOINT, FOUNDRY_IQ_KEY, FOUNDRY_IQ_KB)");
 }
 
 // Agentic retrieval against the Foundry IQ knowledge base. Hard 8s timeout
 // and defensive parsing — generation must never hang or fail because of IQ.
-async function retrieveKnowledge(query) {
-    if (!IQ_CONFIGURED) return "";
+let lastIqError = null;
+let iqWorkingVersion = null;
+let iqWorkingShape = null;
+
+async function tryIqRetrieve(query, version, shape) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8000);
     try {
-        const url = `${FOUNDRY_IQ_ENDPOINT}/knowledgebases/${encodeURIComponent(FOUNDRY_IQ_KB)}/retrieve?api-version=${FOUNDRY_IQ_API_VERSION}`;
+        const url = `${FOUNDRY_IQ_ENDPOINT}/knowledgebases/${encodeURIComponent(FOUNDRY_IQ_KB)}/retrieve?api-version=${version}`;
+        const q = String(query).slice(0, 400);
+        // 2026-04-01 GA standardizes on "intents"; older previews use "messages"
+        const body = shape === "messages"
+            ? { messages: [{ role: "user", content: [{ type: "text", text: q }] }] }
+            : { intents: [{ type: "semantic", search: q }] };
         const r = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json", "api-key": FOUNDRY_IQ_KEY },
-            body: JSON.stringify({
-                messages: [
-                    { role: "user", content: [{ type: "text", text: String(query).slice(0, 400) }] }
-                ]
-            }),
+            body: JSON.stringify(body),
             signal: controller.signal
         });
         if (!r.ok) {
             const t = await r.text();
-            console.error("⚠️ Foundry IQ retrieve error:", r.status, t.slice(0, 200));
-            return "";
+            lastIqError = { status: r.status, apiVersion: version, shape, detail: t.slice(0, 400) };
+            console.error(`⚠️ Foundry IQ ${r.status} (api-version ${version}, ${shape}):`, t.slice(0, 200));
+            return { retryable: r.status === 400, text: "" };
         }
         const data = await r.json();
         let text = data?.response?.[0]?.content?.[0]?.text || "";
@@ -169,20 +187,59 @@ async function retrieveKnowledge(query) {
                 .join("\n");
         }
         text = String(text).slice(0, 2500);
-        if (text) console.log(`🧠 Foundry IQ grounding retrieved (${text.length} chars)`);
-        return text;
+        if (text) {
+            iqWorkingVersion = version;
+            iqWorkingShape = shape;
+            lastIqError = null;
+            console.log(`🧠 Foundry IQ grounding retrieved (${text.length} chars, ${version}/${shape})`);
+        } else {
+            lastIqError = {
+                status: 200,
+                apiVersion: version,
+                shape,
+                detail: "200 OK but no retrievable text. Raw: " + JSON.stringify(data).slice(0, 300)
+            };
+        }
+        return { retryable: false, text };
     } catch (err) {
-        console.error("⚠️ Foundry IQ unavailable:", err.name === "AbortError" ? "timeout (8s)" : err.message);
-        return "";
+        lastIqError = {
+            status: 0,
+            apiVersion: version,
+            shape,
+            detail: err.name === "AbortError" ? "timeout after 8s" : err.message
+        };
+        console.error("⚠️ Foundry IQ unavailable:", lastIqError.detail);
+        return { retryable: false, text: "" };
     } finally {
         clearTimeout(timer);
     }
 }
 
+// Agentic retrieval with automatic api-version fallback. Never throws,
+// never blocks generation for more than ~16s worst case.
+async function retrieveKnowledge(query) {
+    if (!IQ_CONFIGURED) return "";
+    const combos = [];
+    if (iqWorkingVersion && iqWorkingShape) combos.push([iqWorkingVersion, iqWorkingShape]);
+    combos.push([FOUNDRY_IQ_API_VERSION, "intents"]);
+    combos.push(["2026-05-01-preview", "intents"]);
+    combos.push(["2025-11-01-preview", "messages"]);
+    const seen = new Set();
+    for (const [v, s] of combos) {
+        const key = v + "|" + s;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const { retryable, text } = await tryIqRetrieve(query, v, s);
+        if (text) return text;
+        if (!retryable) return "";
+    }
+    return "";
+}
+
 // Model served via HuggingFace Inference Providers (router).
 // Gemma 3 27B: 140+ language support (incl. Latvian and other Baltic/low-resource
 // European languages). Override with HF_MODEL env var without code changes.
-const MODEL = process.env.HF_MODEL || "google/gemma-3-27b-it";
+const MODEL = process.env.HF_MODEL || "google/gemma-4-31B-it";
 
 // Supported output languages
 const LANGUAGES = {
@@ -486,11 +543,32 @@ app.get("/iq-test", speakLimiter, async (req, res) => {
         });
     }
     const sample = await retrieveKnowledge("career change feasibility and labor market outlook");
+    let hint;
+    if (!sample) {
+        const st = lastIqError?.status;
+        if (!IQ_ENDPOINT_LOOKS_RIGHT) {
+            hint = "FOUNDRY_IQ_ENDPOINT doesn't look like an Azure AI Search URL. It must be https://<your-search-name>.search.windows.net (Azure portal → your AI Search resource → Overview → Url). It looks like you may have pasted the Foundry endpoint instead.";
+        } else if (st === 404) {
+            hint = "404: the search service answered, but no knowledge base with this name was found there. Open the Foundry portal → Knowledge bases, copy the EXACT name into FOUNDRY_IQ_KB, and confirm that knowledge base is linked to THIS search service.";
+        } else if (st === 401 || st === 403) {
+            hint = "401/403: the key is wrong for this service. Use the Azure AI SEARCH key: Azure portal → your Search resource → Settings → Keys → Primary admin key (not your Foundry key).";
+        } else if (st === 400) {
+            hint = "400: the service rejected every known request shape (intents + messages across three api-versions). Paste this whole JSON to your assistant.";
+        } else if (st === 200) {
+            hint = "Connected successfully, but the knowledge base returned no text. Check in the Foundry portal that ingestion/indexing has finished and the 6 documents are listed inside the knowledge base.";
+        } else {
+            hint = "Could not reach the search service (network/timeout). Verify the endpoint URL is correct and the service is running.";
+        }
+    }
     res.json({
         ok: !!sample,
+        endpointHost: FOUNDRY_IQ_ENDPOINT.replace(/^https?:\/\//, ""),
+        endpointLooksLikeAzureSearch: IQ_ENDPOINT_LOOKS_RIGHT,
         knowledgeBase: FOUNDRY_IQ_KB,
-        apiVersion: FOUNDRY_IQ_API_VERSION,
-        preview: sample ? sample.slice(0, 300) : "(empty — check the knowledge base has documents and the key/endpoint are correct; see Render logs for details)"
+        apiVersionConfigured: FOUNDRY_IQ_API_VERSION,
+        lastError: sample ? null : lastIqError,
+        hint,
+        preview: sample ? sample.slice(0, 300) : undefined
     });
 });
 
