@@ -69,6 +69,10 @@ if (ALLOWED_ORIGINS.length) {
 // AZURE_AI_ENDPOINT accepts the bare resource URL or a pasted full Target URI —
 // it gets normalized to the base automatically.
 const HF_TOKEN = (process.env.HUGGINGFACE_TOKEN || "").trim();
+// Model served via Hugging Face Inference Providers (router).
+// Gemma 4 31B: Apache-2.0 (no license gate), strong multilingual support
+// (incl. Latvian and other European languages). Override with HF_MODEL.
+const MODEL = process.env.HF_MODEL || "google/gemma-4-31B-it";
 const AZURE_AI_KEY = (process.env.AZURE_AI_KEY || "").trim();
 const AZURE_AI_DEPLOYMENT = (process.env.AZURE_AI_DEPLOYMENT || "").trim();
 const AZURE_AI_API_VERSION = (process.env.AZURE_AI_API_VERSION || "2024-10-21").trim();
@@ -236,10 +240,6 @@ async function retrieveKnowledge(query) {
     return "";
 }
 
-// Model served via HuggingFace Inference Providers (router).
-// Gemma 3 27B: 140+ language support (incl. Latvian and other Baltic/low-resource
-// European languages). Override with HF_MODEL env var without code changes.
-const MODEL = process.env.HF_MODEL || "google/gemma-4-31B-it";
 
 // Supported output languages
 const LANGUAGES = {
