@@ -327,7 +327,13 @@ function looksLikeGibberish(text) {
     const lower = raw.toLowerCase();
     let letters = "";
     for (const ch of lower) if (/\p{L}/u.test(ch)) letters += ch;
-    if (letters.length < 6) return false; // too short to judge fairly
+    if (letters.length < 6) return false;
+
+    // Scripts without Latin-style vowels (Chinese, Japanese, Korean, etc.)
+    // would always read as "no vowels" and false-trigger the checks below.
+    // If the text is largely such a script, treat it as legitimate.
+    const cjkLike = (raw.match(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]/g) || []).length;
+    if (cjkLike >= 2) return false; // too short to judge fairly
 
     const VOWELS = "aeiouyàáâãäåāăąèéêëēĕėęěìíîïĩīĭįòóôõöōŏőøùúûüũūŭůűųýÿæœαεηιοωυаеёиіїоуыэюяє";
     let vowels = 0;
@@ -353,10 +359,33 @@ function looksLikeGibberish(text) {
     let signals = 0;
     if (vowelRatio < 0.18 && letters.length >= 10) signals++;
     if (diversity < 0.25 && letters.length >= 10) signals++;
+    if (maxRun >= 9) return true;
     if (maxRun >= 7) signals++;
     if (seqHits === 1) signals++;
     if (raw.length >= 50 && !hasSpace) signals++;
     return signals >= 2;
+}
+
+// Caring crisis safety net (server-side, so it can't be bypassed by calling
+// the API directly). Detects clear, multi-word crisis phrases — deliberately
+// conservative to avoid false positives on ordinary career frustration
+// ("dead-end job"). Best-effort across common languages, not comprehensive.
+function looksLikeCrisis(text) {
+    const t = ' ' + String(text || '').toLowerCase().replace(/[\n\r]+/g, ' ') + ' ';
+    const phrases = [
+        'kill myself', 'killing myself', 'want to die', 'wanna die', 'wish i was dead',
+        'wish i were dead', 'end my life', 'ending my life', 'take my own life',
+        'suicidal', 'suicide', "don't want to live", 'do not want to live',
+        'no reason to live', 'better off dead', 'self harm', 'self-harm', 'hurt myself',
+        'cut myself', 'wanna end it', 'want to end it all', 'end it all',
+        'quiero morir', 'suicidarme', 'suicidio',
+        'me suicider', 'envie de mourir',
+        'mich umbringen', 'selbstmord', 'nicht mehr leben',
+        'voglio morire', 'suicidarmi',
+        'quero morrer', 'me matar',
+        'gribu nomirt', 'pašnāvīb', 'pašnāvību', 'pašnāvībām', 'negribu dzīvot', 'beigt dzīvi', 'nevēlos dzīvot', 'graizīt sevi', 'iedzer indi', 'noindēties', 'mirt', 'nošauties', 'pakārties', 'noindēt', 'nogalināt sevi', 'nolekt no jumta', 'nolēkt no jumta', 'pakārties striķī', 'striķī', 'izdarīt pašnāvību'
+    ];
+    return phrases.some(p => t.includes(p));
 }
 
 // Whitelist + cap every field the AI returns. Unknown keys are dropped,
@@ -732,6 +761,22 @@ app.post("/generate", generateLimiter, async (req, res) => {
         if (!name || !interests || !situation || !decision || !details) {
             return res.status(400).json({
                 error: "Missing required fields"
+            });
+        }
+
+        // Caring crisis safety net FIRST: if any field contains clear crisis
+        // language, return a supportive response with help resources instead
+        // of generating. Enforced here so it can't be bypassed client-side.
+        const allText = [name, interests, situation, decision, details].join(' ');
+        if (looksLikeCrisis(allText)) {
+            console.log("💙 Crisis language detected — returning support resources, not generating");
+            return res.status(200).json({
+                code: "crisis",
+                support: {
+                    message: "It sounds like you might be going through something really hard. You matter, and support is available.",
+                    findHelp: "https://findahelpline.com",
+                    us: "https://988lifeline.org"
+                }
             });
         }
 
