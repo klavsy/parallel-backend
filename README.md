@@ -7,7 +7,7 @@ Node.js / Express API that powers **[Parallel Universe](https://github.com/klavs
 
 **Live API:** `https://parallel-backend-wq04.onrender.com`
 
-**Frontend repo:** `https://github.com/klavsy/parallel.xyz`
+**Frontend repo:** `https://github.com/klavsy/parallel`
 
 **Live app (on Vercel):** `https://parallel-hazel.vercel.app`
 
