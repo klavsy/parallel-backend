@@ -358,6 +358,18 @@ function sanitizeUniverses(arr) {
                 .map(o => ({ [k1]: s(o?.[k1], 120), [k2]: s(o?.[k2], 240) }))
                 .filter(o => o[k1])
             : [];
+    // Food objects carry extra precision fields (venue + city)
+    const foodArr = (a, n) =>
+        Array.isArray(a)
+            ? a.slice(0, n)
+                .map(o => ({
+                    item: s(o?.item, 120),
+                    venue: s(o?.venue, 80),
+                    city: s(o?.city, 120),
+                    reason: s(o?.reason, 240)
+                }))
+                .filter(o => o.item)
+            : [];
 
     return arr.slice(0, 3).map(u => {
         u = u && typeof u === "object" ? u : {};
@@ -376,7 +388,7 @@ function sanitizeUniverses(arr) {
             recommendations: {
                 jobRoles: sArr(rec.jobRoles, 4, 80),
                 travel: objArr(rec.travel, 3, "place", "reason"),
-                food: objArr(rec.food, 3, "item", "reason")
+                food: foodArr(rec.food, 3)
             }
         };
     });
@@ -579,8 +591,8 @@ app.get("/places", mapsLimiter, async (req, res) => {
         const query = (req.query.query || "").toString().slice(0, 120);
         if (!query) return res.status(400).json({ error: "Missing query" });
 
-        const lat = parseFloat(req.query.lat);
-        const lon = parseFloat(req.query.lon);
+        let lat = parseFloat(req.query.lat);
+        let lon = parseFloat(req.query.lon);
         const limit = Math.min(parseInt(req.query.limit) || 1, 5);
 
         // Precision: restrict the index set so destinations only match
@@ -590,13 +602,36 @@ app.get("/places", mapsLimiter, async (req, res) => {
             : req.query.kind === "poi" ? "POI"
             : null;
 
+        // Two-step precision for POIs: if a "near" city/country is given,
+        // geocode IT first, then bias the POI search to those exact coords.
+        // This is what guarantees a Lisbon dish lands in Lisbon — not in a
+        // same-named place on another continent.
+        const near = (req.query.near || "").toString().slice(0, 120);
+        let radiusM = 30000;
+        if (near && kind === "POI") {
+            try {
+                const geoUrl = `https://atlas.microsoft.com/search/fuzzy/json?api-version=1.0&query=${encodeURIComponent(near)}&limit=1&idxSet=Geo&subscription-key=${AZURE_MAPS_KEY}`;
+                const geoR = await fetch(geoUrl);
+                if (geoR.ok) {
+                    const geoData = await geoR.json();
+                    const g = (geoData.results || [])[0];
+                    if (g && g.position && typeof g.position.lat === "number") {
+                        lat = g.position.lat;
+                        lon = g.position.lon;
+                        radiusM = 25000; // keep results inside that city
+                    }
+                }
+            } catch (e) {
+                console.error("⚠️ near-geocode failed:", e.message);
+            }
+        }
+
         let url = `https://atlas.microsoft.com/search/fuzzy/json?api-version=1.0&query=${encodeURIComponent(query)}&limit=${limit}&subscription-key=${AZURE_MAPS_KEY}`;
         if (kind) url += `&idxSet=${kind}`;
         const validCoords = !isNaN(lat) && !isNaN(lon) &&
             lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
         if (validCoords) {
-            // Bias toward the user's area (30 km) for restaurant lookups
-            url += `&lat=${lat}&lon=${lon}&radius=30000`;
+            url += `&lat=${lat}&lon=${lon}&radius=${radiusM}`;
         }
 
         const r = await fetch(url);
@@ -614,6 +649,8 @@ app.get("/places", mapsLimiter, async (req, res) => {
             lon: p.position?.lon,
             phone: p.poi?.phone || null,
             url: p.poi?.url || null,
+            country: p.address?.country || "",
+            countryCode: p.address?.countryCode || "",
             entityType: p.entityType || p.type || ""
         })).filter(p => typeof p.lat === "number" && typeof p.lon === "number");
 
@@ -723,9 +760,9 @@ Each object MUST have these exact keys (keys stay in English):
 - "realityScore": integer 0-100 — an honest, calibrated estimate of how achievable this specific path is for THIS person given their stated situation, skills and decision${'' /* grounding-aware note added below */}
 - "realityNote": one short sentence (max 25 words) justifying the score honestly
 - "recommendations": object with exactly these keys:
-    - "jobRoles": array of 2-3 REAL job titles that exist on job boards today and fit this universe and the person's interests (short, searchable titles like "UX Designer" or "Data Analyst" — values in ${languageName} but keep titles recognizable/searchable)
-    - "travel": array of 1-2 objects, each {"place": "City, Country", "reason": "one short sentence why it fits this universe"} — real places relevant to this universe's lifestyle
-    - "food": array of 1-2 objects, each {"item": "specific dish or cuisine/restaurant type", "reason": "one short sentence tying it to this universe"}
+    - "jobRoles": array of 2-3 REAL, currently-searchable job titles that DIRECTLY match THIS universe's "careerPath" and "title". They must be the actual roles someone on this exact path would hold — not generic or from a different universe. Use short standard titles a job board would recognize (e.g. "UX Designer", "Data Analyst", "Pastry Chef"). Keep them recognizable/searchable even when ${languageName} differs from English.
+    - "travel": array of 1-2 objects, each {"place": "City, Country", "reason": "one short sentence why it fits this universe"}. ALWAYS include both a real city AND its country, spelled in English (e.g. "Lisbon, Portugal"), even if the reason is written in ${languageName}.
+    - "food": array of 1-2 objects, each {"item": "a specific well-known dish or cuisine", "venue": "the type of place that serves it, e.g. 'sushi restaurant' or 'trattoria'", "city": "the City, Country where this food belongs, in English (e.g. 'Naples, Italy')", "reason": "one short sentence tying it to this universe"}. The city MUST be a real place famous for or strongly associated with that food.
 
 The recommendations MUST be tailored to the person's specific interests, situation, and decision — not generic. Different universes should get different recommendations.
 
