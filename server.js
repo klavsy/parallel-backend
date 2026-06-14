@@ -761,7 +761,11 @@ app.post("/chips", generateLimiter, async (req, res) => {
     try {
         if (!HF_TOKEN) return res.status(200).json({ chips: null });
 
-        const lang = clean(req.body.language || "English").slice(0, 40) || "English";
+        // Sanitize the language string inline (the /generate handler's clean()
+        // is scoped to that route, so we can't use it here). We only need a
+        // short, tag-free language name.
+        const rawLang = typeof req.body.language === "string" ? req.body.language : "English";
+        const lang = rawLang.replace(/[<>]/g, "").trim().slice(0, 40) || "English";
 
         const sys = "You generate short, fun example suggestions for a creative app where users imagine alternate versions of their life. Respond ONLY with valid JSON, no markdown, no preamble.";
         const user = `Generate example chips in ${lang}. Return JSON exactly like:
