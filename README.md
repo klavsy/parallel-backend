@@ -1,5 +1,7 @@
 # Parallel Universe - Backend API
 
+![Architecture](architecture.png)
+
 Node.js / Express API that powers **[Parallel Universe](https://github.com/klavsy/parallel)** - an AI app that generates three alternate-life "universe" cards from a person's situation and a decision they're weighing.
 
 > 🏆 Built for **Microsoft Agents League 2026 · Creative Apps track** by **Klavs Petersons**
