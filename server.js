@@ -798,8 +798,20 @@ Rules: "label" starts with one relevant emoji then 2-4 words. "fill" is what get
         if (typeof text !== "string") text = "";
         text = text.trim();
 
-        // Extract the JSON object defensively
-        const parsed = extractJSON(text);
+        // Extract a JSON OBJECT defensively. (The shared extractJSON() targets
+        // arrays for /generate; chips are an object, so we parse {...} here.)
+        // Strip markdown fences, then slice from the first { to the last }.
+        let parsed = null;
+        try {
+            const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+            const s = cleaned.indexOf("{");
+            const e = cleaned.lastIndexOf("}") + 1;
+            if (s !== -1 && e > s) {
+                parsed = JSON.parse(cleaned.slice(s, e));
+            }
+        } catch (_) {
+            parsed = null;
+        }
         if (!parsed || typeof parsed !== "object") {
             return res.status(200).json({ chips: null });
         }
