@@ -6,8 +6,11 @@ Node.js / Express API that powers **[Parallel Universe](https://github.com/klavs
 > ✅ Integrates the required **Microsoft IQ layer: Foundry IQ** (knowledge-grounded reality scoring)
 
 **[Official website](https://parallia.xyz)** 
+
 **[LIVE API](ttps://parallel-backend-wq04.onrender.com)** 
+
 **[Frontend repo](https://github.com/klavsy/parallel)** 
+
 **[Live App](https://parallel-hazel.vercel.app)** 
 
 ---
