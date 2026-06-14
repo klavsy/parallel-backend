@@ -7,7 +7,7 @@ Node.js / Express API that powers **[Parallel Universe](https://github.com/klavs
 
 **[Official website](https://parallia.xyz)** 
 
-**[LIVE API](https://parallel-backend-wq04.onrender.com)** 
+**[Live API](https://parallel-backend-wq04.onrender.com)** 
 
 **[Frontend repo](https://github.com/klavsy/parallel)** 
 
