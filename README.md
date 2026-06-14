@@ -13,6 +13,9 @@ Node.js / Express API that powers **[Parallel Universe](https://github.com/klavs
 
 **[Live App](https://parallel-hazel.vercel.app)** 
 
+**[Health check](https://parallel-backend-wq04.onrender.com/health)** 
+
+
 ---
 
 ## What this service does
