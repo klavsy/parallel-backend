@@ -137,3 +137,7 @@ While AI generated most of the code, the project was conceived, architected, con
 - **Direction & review** - the author specified what to build, made every architectural and security decision, and tested and reviewed all AI-generated code before shipping it.
 
 In short: AI wrote most of the code; the vision, ideas, the cloud engineering and configuration, the testing, and all the decisions were the author's.
+
+### 🚧 Prototype Status!
+
+This application was developed as a hackathon prototype and serves as a proof of concept for exploring alternate life paths through AI. The current implementation focuses on demonstrating the vision and key functionality. Future versions may feature a more modular architecture, richer simulations, expanded integrations, enhanced personalization, stronger safety features, and a more refined user experience.
