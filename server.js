@@ -385,7 +385,7 @@ function looksLikeGibberish(text) {
 function looksLikeCrisis(text) {
     const t = ' ' + String(text || '').toLowerCase().replace(/[\n\r]+/g, ' ') + ' ';
     const phrases = [
-        'kill myself', 'killing myself', 'want to die', 'wanna die', 'wish i was dead',
+        'kill myself', 'killing myself', 'die', 'hang myself', 'rope', 'shoot myself', 'take a pill', 'dead', 'jump from rooftop', 'i want to jump from', 'drown myself', 'cutting myself', 'want to die', 'wanna die', 'wish i was dead',
         'wish i were dead', 'end my life', 'ending my life', 'take my own life',
         'suicidal', 'suicide', "don't want to live", 'do not want to live',
         'no reason to live', 'better off dead', 'self harm', 'self-harm', 'hurt myself',
@@ -395,7 +395,7 @@ function looksLikeCrisis(text) {
         'mich umbringen', 'selbstmord', 'nicht mehr leben',
         'voglio morire', 'suicidarmi',
         'quero morrer', 'me matar',
-        'gribu nomirt', 'pašnāvīb', 'izdarīt pašnāvību'
+        'gribu nomirt', 'mirt', 'nomirt', 'nošauties', 'graizu sevi', 'graizīt sevi', 'iešaut sev galvā', 'striķis', 'noindēties', 'indēties', 'atspgrāt', 'apsprāgt',  'kārties striķī', 'apnicis dzīvot', 'pakārties', 'pakārt sevi', 'jāiet kārties', 'nosprāgt', 'pašnāvīb', 'pašnāvība', 'pašnāvību', 'izdarīt pašnāvību'
     ];
     return phrases.some(p => t.includes(p));
 }
