@@ -385,7 +385,7 @@ function looksLikeGibberish(text) {
 function looksLikeCrisis(text) {
     const t = ' ' + String(text || '').toLowerCase().replace(/[\n\r]+/g, ' ') + ' ';
     const phrases = [
-        'kill myself', 'killing myself', 'die', 'hang myself', 'rope', 'shoot myself', 'take a pill', 'dead', 'jump from rooftop', 'i want to jump from', 'drown myself', 'cutting myself', 'want to die', 'wanna die', 'wish i was dead',
+        'kill myself', 'killing myself', 'want to die', 'wanna die', 'wish i was dead',
         'wish i were dead', 'end my life', 'ending my life', 'take my own life',
         'suicidal', 'suicide', "don't want to live", 'do not want to live',
         'no reason to live', 'better off dead', 'self harm', 'self-harm', 'hurt myself',
@@ -395,7 +395,7 @@ function looksLikeCrisis(text) {
         'mich umbringen', 'selbstmord', 'nicht mehr leben',
         'voglio morire', 'suicidarmi',
         'quero morrer', 'me matar',
-        'gribu nomirt', 'mirt', 'nomirt', 'nošauties', 'graizu sevi', 'graizīt sevi', 'iešaut sev galvā', 'striķis', 'noindēties', 'indēties', 'atspgrāt', 'apsprāgt',  'kārties striķī', 'apnicis dzīvot', 'pakārties', 'pakārt sevi', 'jāiet kārties', 'nosprāgt', 'pašnāvīb', 'pašnāvība', 'pašnāvību', 'izdarīt pašnāvību'
+        'gribu nomirt', 'pašnāvīb', 'izdarīt pašnāvību'
     ];
     return phrases.some(p => t.includes(p));
 }
@@ -439,7 +439,7 @@ function sanitizeUniverses(arr) {
             realityScore: Number.isFinite(Number(u.realityScore))
                 ? Math.max(0, Math.min(100, Math.round(Number(u.realityScore))))
                 : null,
-            realityNote: s(u.realityNote, 200),
+            realityNote: Number.isFinite(Number(u.realityScore)) ? s(u.realityNote, 200) : null,
             recommendations: {
                 jobRoles: sArr(rec.jobRoles, 4, 80),
                 travel: objArr(rec.travel, 3, "place", "reason"),
@@ -818,13 +818,20 @@ Rules: "label" starts with one relevant emoji then 2-4 words. "fill" is what get
 
         // Validate + sanitize shape: keep only the 4 fields, cap counts/lengths
         const fields = { interests: 4, situation: 4, decision: 4, details: 3 };
+        // Trim stray leading/trailing punctuation the small model sometimes adds
+        // (e.g. a fill that comes back as ",enjoying nature" or "- coding").
+        const tidy = (s) => String(s || "")
+            .trim()
+            .replace(/^[\s,;:.\-–—•*"']+/, "")   // leading commas/dashes/bullets/quotes
+            .replace(/[\s,;:]+$/, "")             // trailing commas/semicolons/spaces
+            .trim();
         const out = {};
         let valid = true;
         for (const [f, n] of Object.entries(fields)) {
             if (!Array.isArray(parsed[f])) { valid = false; break; }
             out[f] = parsed[f].slice(0, n).map(c => ({
-                label: String(c && c.label || "").slice(0, 40),
-                fill: String(c && c.fill || "").slice(0, 160)
+                label: tidy(c && c.label).slice(0, 40),
+                fill: tidy(c && c.fill).slice(0, 160)
             })).filter(c => c.label && c.fill);
             if (out[f].length === 0) { valid = false; break; }
         }
@@ -911,21 +918,24 @@ Each object MUST have these exact keys (keys stay in English):
 - "description": 2-3 sentence story of this universe (string)
 - "careerPath": the career they pursued (string)
 - "keyEvents": array of 3-4 short strings (major milestones)
-- "outcome": where they ended up (string)
-- "realityScore": integer 0-100 — an honest, calibrated estimate of how achievable this specific path is for THIS person given their stated situation, skills and decision${'' /* grounding-aware note added below */}
-- "realityNote": one short sentence (max 25 words) justifying the score honestly
+- "outcome": where they ended up (string)${grounding ? `
+- "realityScore": integer 0-100 — an honest, calibrated estimate of how achievable this specific path is for THIS person, derived from the grounding facts provided below
+- "realityNote": one short sentence (max 25 words) justifying the score, reflecting what the grounding facts imply about feasibility` : ""}
 - "recommendations": object with exactly these keys:
     - "jobRoles": array of 2-3 REAL, currently-searchable job titles that DIRECTLY match THIS universe's "careerPath" and "title". They must be the actual roles someone on this exact path would hold — not generic or from a different universe. Use short standard titles a job board would recognize (e.g. "UX Designer", "Data Analyst", "Pastry Chef"). Keep them recognizable/searchable even when ${languageName} differs from English.
     - "travel": array of 1-2 objects, each {"place": "City, Country", "reason": "one short sentence why it fits this universe"}. ALWAYS include both a real city AND its country, spelled in English (e.g. "Lisbon, Portugal"), even if the reason is written in ${languageName}.
     - "food": array of 1-2 objects, each {"item": "a specific well-known dish or cuisine", "venue": "the type of place that serves it, e.g. 'sushi restaurant' or 'trattoria'", "city": "the City, Country where this food belongs, in English (e.g. 'Naples, Italy')", "reason": "one short sentence tying it to this universe"}. The city MUST be a real place famous for or strongly associated with that food.
 
 The recommendations MUST be tailored to the person's specific interests, situation, and decision — not generic. Different universes should get different recommendations.
-
-realityScore rules: be honest, not flattering — bold paths usually score lower than steady ones; the three universes must NOT share the same score; base it on the person's actual starting point${"" + (grounding ? " AND on the grounding facts below" : "")}.
-${grounding ? `Grounding facts retrieved from the Foundry IQ knowledge base (use them to calibrate realityScore, realityNote and recommendations; do not cite sources):
+${grounding ? `
+realityScore rules: the score MUST be derived from the real-world grounding facts below — let them directly determine each number (demand, competition, typical timelines, entry barriers). Be honest, not flattering — bold paths usually score lower than steady ones, and the three universes must NOT share the same score. Each realityNote must reflect what the grounding facts imply about that path's feasibility.
+=== GROUNDING FACTS (retrieved from the Foundry IQ knowledge base — real labour-market / career data) ===
+Use these to calibrate every realityScore and realityNote. Do NOT cite or mention the source; just let the facts shape your numbers and reasoning:
 <knowledge>
 ${grounding}
-</knowledge>` : ""}
+</knowledge>
+=== END GROUNDING FACTS ===` : `
+Do NOT include "realityScore" or "realityNote" fields — omit them entirely from each object.`}
 
 VERY IMPORTANT: Write ALL string VALUES in ${languageName}. The JSON keys must remain exactly in English as listed above. Do not translate the keys. For "place" keep the city and country names in their commonly used ${languageName} forms.
 
