@@ -216,7 +216,7 @@ async function tryIqRetrieve(query, version, shape) {
                 .filter(Boolean)
                 .join("\n");
         }
-        text = String(text).slice(0, 2500);
+        text = String(text).slice(0, 1400);
         if (text) {
             iqWorkingVersion = version;
             iqWorkingShape = shape;
@@ -998,10 +998,25 @@ Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 stead
                 max_tokens: 2800,
                 temperature: 0.8
             });
-            const MAX_ATTEMPTS = 4;
+            const MAX_ATTEMPTS = 2;
             let resp, errText = "";
             for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-                resp = await fetch(apiUrl, { method: "POST", headers: apiHeaders, body });
+                // Per-call timeout so a single slow request can't hang for
+                // minutes (which was causing client "failed to fetch").
+                const callCtrl = new AbortController();
+                const callTimer = setTimeout(() => callCtrl.abort(), 60000);
+                try {
+                    resp = await fetch(apiUrl, { method: "POST", headers: apiHeaders, body, signal: callCtrl.signal });
+                } catch (err) {
+                    clearTimeout(callTimer);
+                    if (err.name === "AbortError") {
+                        errText = "Model call timed out";
+                        if (attempt === MAX_ATTEMPTS) return { ok: false, status: 504, errText };
+                        continue;
+                    }
+                    throw err;
+                }
+                clearTimeout(callTimer);
                 console.log(`📤 ${providerName} status:`, resp.status,
                     `[${modelName}]`, attempt > 1 ? `(attempt ${attempt}/${MAX_ATTEMPTS})` : "");
                 if (resp.ok) return { ok: true, data: await resp.json() };
