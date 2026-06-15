@@ -995,7 +995,7 @@ Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 stead
             const body = JSON.stringify({
                 model: modelName,
                 messages,
-                max_tokens: 3500,
+                max_tokens: 2800,
                 temperature: 0.8
             });
             const MAX_ATTEMPTS = 4;
