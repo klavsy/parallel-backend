@@ -80,14 +80,14 @@ const HF_TOKEN = (process.env.HUGGINGFACE_TOKEN || "").trim();
 // Model served via Hugging Face Inference Providers (router).
 // Gemma 4 31B: Apache-2.0 (no license gate), strong multilingual support
 // (incl. Latvian and other European languages). Override with HF_MODEL.
-const MODEL = process.env.HF_MODEL || "google/gemma-4-31B-it";
+const MODEL = process.env.HF_MODEL || "google/gemma-3-27b-it";
 // Fallback model on the SAME Hugging Face router: if the primary model is
 // rate-limited or unavailable after retries, we transparently retry the
 // request on this smaller, more-available model so the user still gets a
 // result. Set HF_FALLBACK_MODEL="" to disable. Default: Gemma 3 27B (the
 // model this app ran on previously — proven multilingual incl. Latvian).
 const HF_FALLBACK_MODEL = process.env.HF_FALLBACK_MODEL === undefined
-    ? "google/gemma-3-27b-it"
+    ? "google/gemma-2-9b-it"
     : process.env.HF_FALLBACK_MODEL.trim();
 
 // Small, fast model used ONLY to pre-generate example chips (short, varied
@@ -186,6 +186,49 @@ let lastIqError = null;
 let iqWorkingVersion = null;
 let iqWorkingShape = null;
 
+// ---------------------------------------------------------------------------
+// Lightweight in-memory TTL cache. Speeds up repeated work without any external
+// dependency. Note: this is per-instance and clears on restart/redeploy — fine
+// for a single Render instance. Each entry expires after its ttl.
+// ---------------------------------------------------------------------------
+function makeCache(maxEntries = 500) {
+    const store = new Map(); // key -> { value, expires }
+    return {
+        get(key) {
+            const hit = store.get(key);
+            if (!hit) return undefined;
+            if (Date.now() > hit.expires) { store.delete(key); return undefined; }
+            // refresh recency (LRU-ish): re-insert
+            store.delete(key); store.set(key, hit);
+            return hit.value;
+        },
+        set(key, value, ttlMs) {
+            // evict oldest if over capacity
+            if (store.size >= maxEntries) {
+                const oldest = store.keys().next().value;
+                if (oldest !== undefined) store.delete(oldest);
+            }
+            store.set(key, { value, expires: Date.now() + ttlMs });
+        },
+        get size() { return store.size; }
+    };
+}
+
+// Three caches with sensible TTLs:
+const groundingCache = makeCache(800);   // Foundry IQ lookups (reused across users)
+const generateCache  = makeCache(300);   // identical full generations
+const chipsCache     = makeCache(80);    // example chips (same per language)
+const GROUNDING_TTL  = 24 * 60 * 60 * 1000; // 24h — labour-market facts are stable
+const GENERATE_TTL   = 60 * 60 * 1000;      // 1h — identical inputs → same result
+const CHIPS_TTL      = 12 * 60 * 60 * 1000; // 12h — chips rarely need to change
+
+// Stable cache key from an object (order-independent).
+function cacheKeyFromObject(obj) {
+    try {
+        return JSON.stringify(obj, Object.keys(obj).sort());
+    } catch { return String(obj); }
+}
+
 async function tryIqRetrieve(query, version, shape) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8000);
@@ -249,6 +292,14 @@ async function tryIqRetrieve(query, version, shape) {
 // never blocks generation for more than ~16s worst case.
 async function retrieveKnowledge(query) {
     if (!IQ_CONFIGURED) return "";
+    // Cache: the same/similar career query returns the same grounding facts,
+    // and those facts are stable for hours/days. Big speedup for popular themes.
+    const cacheKey = "iq:" + String(query || "").toLowerCase().trim().slice(0, 200);
+    const cached = groundingCache.get(cacheKey);
+    if (cached !== undefined) {
+        console.log("⚡ Foundry IQ grounding served from cache");
+        return cached;
+    }
     const combos = [];
     if (iqWorkingVersion && iqWorkingShape) combos.push([iqWorkingVersion, iqWorkingShape]);
     combos.push([FOUNDRY_IQ_API_VERSION, "intents"]);
@@ -260,8 +311,8 @@ async function retrieveKnowledge(query) {
         if (seen.has(key)) continue;
         seen.add(key);
         const { retryable, text } = await tryIqRetrieve(query, v, s);
-        if (text) return text;
-        if (!retryable) return "";
+        if (text) { groundingCache.set(cacheKey, text, GROUNDING_TTL); return text; }
+        if (!retryable) { groundingCache.set(cacheKey, "", GROUNDING_TTL); return ""; }
     }
     return "";
 }
@@ -767,6 +818,14 @@ app.post("/chips", generateLimiter, async (req, res) => {
         const rawLang = typeof req.body.language === "string" ? req.body.language : "English";
         const lang = rawLang.replace(/[<>]/g, "").trim().slice(0, 40) || "English";
 
+        // Cache: chips are the same per language, so generate once and reuse.
+        const chipsKey = "chips:" + lang.toLowerCase();
+        const cachedChips = chipsCache.get(chipsKey);
+        if (cachedChips) {
+            console.log(`⚡ chips served from cache (${lang})`);
+            return res.status(200).json({ chips: cachedChips });
+        }
+
         const sys = "You generate short, fun example suggestions for a creative app where users imagine alternate versions of their life. Respond ONLY with valid JSON, no markdown, no preamble.";
         const user = `Generate example chips in ${lang}. Return JSON exactly like:
 {"interests":[{"label":"<emoji> <2-4 words>","fill":"<a natural phrase, 4-8 words>"}, ...4 items],
@@ -838,6 +897,7 @@ Rules: "label" starts with one relevant emoji then 2-4 words. "fill" is what get
         if (!valid) return res.status(200).json({ chips: null });
 
         console.log(`✨ chips generated (${lang}) via ${HF_CHIPS_MODEL}`);
+        chipsCache.set(chipsKey, out, CHIPS_TTL);
         return res.status(200).json({ chips: out });
     } catch (e) {
         console.log("chips: error, frontend keeps static chips —", e.message);
@@ -899,6 +959,17 @@ app.post("/generate", generateLimiter, async (req, res) => {
         // Resolve language (default English)
         const languageName = LANGUAGES[lang] || "English";
         console.log("🌐 Output language:", languageName);
+
+        // Cache: identical inputs (same name/interests/situation/decision/details
+        // + language) return the same result. Checked AFTER the crisis and
+        // gibberish guards so safety is never cached or bypassed. This makes
+        // repeat/demo requests effectively instant.
+        const genCacheKey = "gen:" + cacheKeyFromObject({ name, interests, situation, decision, details, lang });
+        const cachedGen = generateCache.get(genCacheKey);
+        if (cachedGen) {
+            console.log("⚡ Generation served from cache (instant)");
+            return res.json({ ...cachedGen, meta: { ...cachedGen.meta, cached: true } });
+        }
 
         // Foundry IQ: retrieve grounding facts for this person's decision
         // (returns "" instantly when not configured — never blocks)
@@ -995,7 +1066,7 @@ Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 stead
             const body = JSON.stringify({
                 model: modelName,
                 messages,
-                max_tokens: 2800,
+                max_tokens: 2400,
                 temperature: 0.8
             });
             const MAX_ATTEMPTS = 2;
@@ -1004,7 +1075,7 @@ Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 stead
                 // Per-call timeout so a single slow request can't hang for
                 // minutes (which was causing client "failed to fetch").
                 const callCtrl = new AbortController();
-                const callTimer = setTimeout(() => callCtrl.abort(), 60000);
+                const callTimer = setTimeout(() => callCtrl.abort(), 35000);
                 try {
                     resp = await fetch(apiUrl, { method: "POST", headers: apiHeaders, body, signal: callCtrl.signal });
                 } catch (err) {
@@ -1114,7 +1185,7 @@ Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 stead
         console.log("✅ Success! Generated", universes.length, "universes");
 
         // Real pipeline telemetry — shown to the user as a transparency strip
-        res.json({
+        const responsePayload = {
             universes,
             meta: {
                 grounded: !!grounding,
@@ -1124,7 +1195,10 @@ Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 stead
                 modelMs: Date.now() - tModel,
                 count: universes.length
             }
-        });
+        };
+        // Cache the successful result for identical future requests.
+        if (universes.length) generateCache.set(genCacheKey, responsePayload, GENERATE_TTL);
+        res.json(responsePayload);
 
     } catch (err) {
         console.error("❌ Server error:", err.message);
