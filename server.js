@@ -80,14 +80,14 @@ const HF_TOKEN = (process.env.HUGGINGFACE_TOKEN || "").trim();
 // Model served via Hugging Face Inference Providers (router).
 // Gemma 4 31B: Apache-2.0 (no license gate), strong multilingual support
 // (incl. Latvian and other European languages). Override with HF_MODEL.
-const MODEL = process.env.HF_MODEL || "google/gemma-3-27b-it";
+const MODEL = process.env.HF_MODEL || "google/gemma-4-31B-it:fastest";
 // Fallback model on the SAME Hugging Face router: if the primary model is
 // rate-limited or unavailable after retries, we transparently retry the
 // request on this smaller, more-available model so the user still gets a
 // result. Set HF_FALLBACK_MODEL="" to disable. Default: Gemma 3 27B (the
 // model this app ran on previously — proven multilingual incl. Latvian).
 const HF_FALLBACK_MODEL = process.env.HF_FALLBACK_MODEL === undefined
-    ? "google/gemma-2-9b-it"
+    ? "google/gemma-3-27b-it:fastest"
     : process.env.HF_FALLBACK_MODEL.trim();
 
 // Small, fast model used ONLY to pre-generate example chips (short, varied
@@ -1190,7 +1190,7 @@ Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 stead
             meta: {
                 grounded: !!grounding,
                 iqMs: grounding ? iqMs : 0,
-                model: String(usedModel).split("/").pop(),
+                model: String(usedModel).split("/").pop().split(":")[0],
                 provider: providerName,
                 modelMs: Date.now() - tModel,
                 count: universes.length
