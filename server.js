@@ -80,21 +80,25 @@ const HF_TOKEN = (process.env.HUGGINGFACE_TOKEN || "").trim();
 // Model served via Hugging Face Inference Providers (router).
 // Gemma 4 31B: Apache-2.0 (no license gate), strong multilingual support
 // (incl. Latvian and other European languages). Override with HF_MODEL.
-const MODEL = process.env.HF_MODEL || "google/gemma-3-27b-it";
+const MODEL = process.env.HF_MODEL || "google/gemma-4-31B-it:novita";
 // Fallback model on the SAME Hugging Face router: if the primary model is
 // rate-limited or unavailable after retries, we transparently retry the
 // request on this smaller, more-available model so the user still gets a
 // result. Set HF_FALLBACK_MODEL="" to disable. Default: Gemma 3 27B (the
 // model this app ran on previously — proven multilingual incl. Latvian).
 const HF_FALLBACK_MODEL = process.env.HF_FALLBACK_MODEL === undefined
-    ? "google/gemma-3-12b-it"
+    ? "google/gemma-4-31B-it:together"
     : process.env.HF_FALLBACK_MODEL.trim();
 
 // Small, fast model used ONLY to pre-generate example chips (short, varied
 // prompt suggestions). Cheaper + quicker than the story model since chips are
 // tiny. Configurable; the frontend always has static fallback chips if this
 // is slow or fails, so it's purely a nice-to-have enhancement.
-const HF_CHIPS_MODEL = process.env.HF_CHIPS_MODEL || "google/gemma-3-12b-it";
+// Chips use the same confirmed-available model+provider as the main generator
+// (gemma-4-31B via Novita). Using a verified combo avoids the provider-routing
+// 404/504s that unverified model:provider pairs can hit. Override via env if
+// you find a cheaper small model that a provider actually serves.
+const HF_CHIPS_MODEL = process.env.HF_CHIPS_MODEL || "google/gemma-4-31B-it:novita";
 const AZURE_AI_KEY = (process.env.AZURE_AI_KEY || "").trim();
 const AZURE_AI_DEPLOYMENT = (process.env.AZURE_AI_DEPLOYMENT || "").trim();
 const AZURE_AI_API_VERSION = (process.env.AZURE_AI_API_VERSION || "2024-10-21").trim();
