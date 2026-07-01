@@ -80,21 +80,21 @@ const HF_TOKEN = (process.env.HUGGINGFACE_TOKEN || "").trim();
 // Model served via Hugging Face Inference Providers (router).
 // Gemma 4 31B: Apache-2.0 (no license gate), strong multilingual support
 // (incl. Latvian and other European languages). Override with HF_MODEL.
-const MODEL = process.env.HF_MODEL || "google/gemma-4-31B-it:fastest";
+const MODEL = process.env.HF_MODEL || "google/gemma-3-27b-it";
 // Fallback model on the SAME Hugging Face router: if the primary model is
 // rate-limited or unavailable after retries, we transparently retry the
 // request on this smaller, more-available model so the user still gets a
 // result. Set HF_FALLBACK_MODEL="" to disable. Default: Gemma 3 27B (the
 // model this app ran on previously — proven multilingual incl. Latvian).
 const HF_FALLBACK_MODEL = process.env.HF_FALLBACK_MODEL === undefined
-    ? "google/gemma-3-27b-it:fastest"
+    ? "google/gemma-3-12b-it"
     : process.env.HF_FALLBACK_MODEL.trim();
 
 // Small, fast model used ONLY to pre-generate example chips (short, varied
 // prompt suggestions). Cheaper + quicker than the story model since chips are
 // tiny. Configurable; the frontend always has static fallback chips if this
 // is slow or fails, so it's purely a nice-to-have enhancement.
-const HF_CHIPS_MODEL = process.env.HF_CHIPS_MODEL || "Qwen/Qwen2.5-7B-Instruct";
+const HF_CHIPS_MODEL = process.env.HF_CHIPS_MODEL || "google/gemma-3-12b-it";
 const AZURE_AI_KEY = (process.env.AZURE_AI_KEY || "").trim();
 const AZURE_AI_DEPLOYMENT = (process.env.AZURE_AI_DEPLOYMENT || "").trim();
 const AZURE_AI_API_VERSION = (process.env.AZURE_AI_API_VERSION || "2024-10-21").trim();
@@ -877,6 +877,13 @@ Rules: "label" starts with one relevant emoji then 2-4 words. "fill" is what get
 
         // Validate + sanitize shape: keep only the 4 fields, cap counts/lengths
         const fields = { interests: 4, situation: 4, decision: 4, details: 3 };
+        // Guard against CJK (Chinese/Japanese/Korean) leakage from the model:
+        // unless the requested language is itself CJK, any chip containing CJK
+        // characters means the model drifted — reject so the frontend keeps its
+        // clean static chips instead of showing gibberish.
+        const CJK_RE = /[\u3000-\u303F\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF\uFF00-\uFFEF]/;
+        const cjkLangs = ["chinese", "japanese", "korean", "mandarin", "cantonese"];
+        const langAllowsCJK = cjkLangs.some(l => lang.toLowerCase().includes(l));
         // Trim stray leading/trailing punctuation the small model sometimes adds
         // (e.g. a fill that comes back as ",enjoying nature" or "- coding").
         const tidy = (s) => String(s || "")
@@ -893,6 +900,11 @@ Rules: "label" starts with one relevant emoji then 2-4 words. "fill" is what get
                 fill: tidy(c && c.fill).slice(0, 160)
             })).filter(c => c.label && c.fill);
             if (out[f].length === 0) { valid = false; break; }
+            // Reject the whole batch if CJK leaked into a non-CJK language
+            if (!langAllowsCJK && out[f].some(c => CJK_RE.test(c.label) || CJK_RE.test(c.fill))) {
+                console.log(`chips: CJK leak detected for ${lang} — keeping static chips`);
+                valid = false; break;
+            }
         }
         if (!valid) return res.status(200).json({ chips: null });
 
@@ -1075,7 +1087,7 @@ Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 stead
                 // Per-call timeout so a single slow request can't hang for
                 // minutes (which was causing client "failed to fetch").
                 const callCtrl = new AbortController();
-                const callTimer = setTimeout(() => callCtrl.abort(), 35000);
+                const callTimer = setTimeout(() => callCtrl.abort(), 55000);
                 try {
                     resp = await fetch(apiUrl, { method: "POST", headers: apiHeaders, body, signal: callCtrl.signal });
                 } catch (err) {
@@ -1092,7 +1104,8 @@ Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 stead
                     `[${modelName}]`, attempt > 1 ? `(attempt ${attempt}/${MAX_ATTEMPTS})` : "");
                 if (resp.ok) return { ok: true, data: await resp.json() };
 
-                const transient = resp.status === 429 || resp.status === 503;
+                const transient = resp.status === 429 || resp.status === 503 ||
+                                  resp.status === 502 || resp.status === 504;
                 if (!transient || attempt === MAX_ATTEMPTS) {
                     errText = await resp.text();
                     return { ok: false, status: resp.status, errText };
