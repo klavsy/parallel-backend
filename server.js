@@ -80,14 +80,14 @@ const HF_TOKEN = (process.env.HUGGINGFACE_TOKEN || "").trim();
 // Model served via Hugging Face Inference Providers (router).
 // Gemma 4 31B: Apache-2.0 (no license gate), strong multilingual support
 // (incl. Latvian and other European languages). Override with HF_MODEL.
-const MODEL = process.env.HF_MODEL || "google/gemma-4-31B-it:novita";
+const MODEL = process.env.HF_MODEL || "google/gemma-3-27b-it";
 // Fallback model on the SAME Hugging Face router: if the primary model is
 // rate-limited or unavailable after retries, we transparently retry the
 // request on this smaller, more-available model so the user still gets a
 // result. Set HF_FALLBACK_MODEL="" to disable. Default: Gemma 3 27B (the
 // model this app ran on previously — proven multilingual incl. Latvian).
 const HF_FALLBACK_MODEL = process.env.HF_FALLBACK_MODEL === undefined
-    ? "google/gemma-4-31B-it:together"
+    ? "google/gemma-3-12b-it"
     : process.env.HF_FALLBACK_MODEL.trim();
 
 // Small, fast model used ONLY to pre-generate example chips (short, varied
@@ -98,7 +98,7 @@ const HF_FALLBACK_MODEL = process.env.HF_FALLBACK_MODEL === undefined
 // (gemma-4-31B via Novita). Using a verified combo avoids the provider-routing
 // 404/504s that unverified model:provider pairs can hit. Override via env if
 // you find a cheaper small model that a provider actually serves.
-const HF_CHIPS_MODEL = process.env.HF_CHIPS_MODEL || "google/gemma-4-31B-it:novita";
+const HF_CHIPS_MODEL = process.env.HF_CHIPS_MODEL || "google/gemma-3-27b-it";
 const AZURE_AI_KEY = (process.env.AZURE_AI_KEY || "").trim();
 const AZURE_AI_DEPLOYMENT = (process.env.AZURE_AI_DEPLOYMENT || "").trim();
 const AZURE_AI_API_VERSION = (process.env.AZURE_AI_API_VERSION || "2024-10-21").trim();
@@ -507,6 +507,69 @@ function looksHarmful(text) {
 
     const all = [...weapons, ...drugs, ...hacking, ...violence, ...illegal];
     return all.some(p => t.includes(p));
+}
+
+// Shared AI-calling helper used by BOTH /generate and /continue. Encapsulates
+// the provider selection, per-call timeout, retries on transient errors, and
+// primary→fallback model logic. Returns { ok, text, usedModel, status, errText }.
+async function callAIModel(messages, { maxTokens = 2400, temperature = 0.8 } = {}) {
+    const providerName = USE_FOUNDRY ? "Azure AI Foundry" : "Hugging Face";
+    let apiUrl, apiHeaders;
+    if (USE_FOUNDRY) {
+        apiUrl = AZURE_AI_ENDPOINT.toLowerCase().includes(".services.ai.azure.com")
+            ? `${AZURE_AI_ENDPOINT}/models/chat/completions?api-version=2024-05-01-preview`
+            : `${AZURE_AI_ENDPOINT}/openai/deployments/${AZURE_AI_DEPLOYMENT}/chat/completions?api-version=${AZURE_AI_API_VERSION}`;
+        apiHeaders = { "Content-Type": "application/json", "api-key": AZURE_AI_KEY, "Authorization": `Bearer ${AZURE_AI_KEY}` };
+    } else {
+        apiUrl = "https://router.huggingface.co/v1/chat/completions";
+        apiHeaders = { "Content-Type": "application/json", Authorization: `Bearer ${HF_TOKEN}` };
+    }
+
+    const callModel = async (modelName) => {
+        const body = JSON.stringify({ model: modelName, messages, max_tokens: maxTokens, temperature });
+        const MAX_ATTEMPTS = 2;
+        let resp, errText = "";
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            const callCtrl = new AbortController();
+            const callTimer = setTimeout(() => callCtrl.abort(), 55000);
+            try {
+                resp = await fetch(apiUrl, { method: "POST", headers: apiHeaders, body, signal: callCtrl.signal });
+            } catch (err) {
+                clearTimeout(callTimer);
+                if (err.name === "AbortError") {
+                    if (attempt === MAX_ATTEMPTS) return { ok: false, status: 504, errText: "Model call timed out" };
+                    continue;
+                }
+                throw err;
+            }
+            clearTimeout(callTimer);
+            if (resp.ok) return { ok: true, data: await resp.json() };
+            const transient = resp.status === 429 || resp.status === 503 || resp.status === 502 || resp.status === 504;
+            if (!transient || attempt === MAX_ATTEMPTS) { errText = await resp.text(); return { ok: false, status: resp.status, errText }; }
+            const backoffMs = Math.pow(2, attempt) * 750 + Math.random() * 400;
+            await new Promise(r => setTimeout(r, backoffMs));
+        }
+        return { ok: false, status: resp ? resp.status : 500, errText };
+    };
+
+    const primaryModel = USE_FOUNDRY ? AZURE_AI_DEPLOYMENT : MODEL;
+    let result = await callModel(primaryModel);
+    let usedModel = primaryModel;
+    if (!result.ok && !USE_FOUNDRY && HF_FALLBACK_MODEL && HF_FALLBACK_MODEL !== primaryModel) {
+        result = await callModel(HF_FALLBACK_MODEL);
+        usedModel = HF_FALLBACK_MODEL;
+    }
+    if (!result.ok) return { ok: false, status: result.status, errText: result.errText, usedModel };
+
+    // Extract text from the various provider response shapes.
+    const choice = result.data?.choices?.[0];
+    const msg = choice?.message || {};
+    let text = "";
+    if (typeof msg.content === "string") text = msg.content;
+    else if (Array.isArray(msg.content)) text = msg.content.map(p => (typeof p === "string" ? p : p?.text || "")).join("");
+    else if (typeof msg.reasoning_content === "string") text = msg.reasoning_content;
+    else if (typeof result.data?.output_text === "string") text = result.data.output_text;
+    return { ok: true, text, usedModel, status: 200 };
 }
 
 // Whitelist + cap every field the AI returns. Unknown keys are dropped,
@@ -1290,6 +1353,100 @@ Make universe 1 optimistic/bold, universe 2 balanced/realistic, universe 3 stead
             error: "Server error",
             message: err.message
         });
+    }
+});
+
+// ====== /continue — generate the NEXT CHAPTER of an existing universe ======
+// Takes one previously-generated universe + the person's original context and
+// writes what happens 5 years later, as a single new chapter object. Reuses the
+// shared AI helper, crisis/harm guards, and language handling.
+app.post("/continue", generateLimiter, async (req, res) => {
+    try {
+        // Inline sanitizer (the /generate handler's clean() is scoped there).
+        const clean = (v, max) => String(v == null ? "" : v)
+            .replace(/[<>]/g, "").replace(/\s+/g, " ").trim().slice(0, max);
+        const rawLang = typeof req.body.language === "string" ? req.body.language : "en";
+        const lang = rawLang.replace(/[<>]/g, "").trim().slice(0, 8) || "en";
+        const languageName = LANGUAGES[lang] || "English";
+
+        const u = req.body.universe || {};
+        const name = clean(req.body.name || "", 100);
+        // Compose a compact description of the universe so far.
+        const prior = [
+            u.title ? `Title: ${clean(u.title, 200)}` : "",
+            u.careerPath ? `Career: ${clean(u.careerPath, 200)}` : "",
+            u.outcome ? `Where they ended up: ${clean(u.outcome, 600)}` : "",
+            u.description ? `Story so far: ${clean(u.description, 800)}` : ""
+        ].filter(Boolean).join("\n");
+
+        if (!prior) {
+            return res.status(400).json({ error: "No universe provided to continue." });
+        }
+
+        // Safety guards (same as /generate): crisis first, then harmful.
+        const allText = `${name} ${prior}`;
+        if (looksLikeCrisis(allText)) {
+            return res.status(200).json({ code: "crisis" });
+        }
+        if (looksHarmful(allText)) {
+            return res.status(200).json({ code: "declined", message: "This can't be continued." });
+        }
+
+        const prompt = `You are a creative storyteller. Below is one alternate-life universe for a person${name ? ` named ${name}` : ""}. Write what happens NEXT — the next chapter, about 5 years further into this life. Keep continuity with what came before, but introduce a meaningful new development, challenge, or turning point.
+
+Return ONLY a single JSON object (no markdown, no extra text) with EXACTLY these keys:
+- "chapterTitle": a short evocative title for this next chapter (string)
+- "chapter": 3-4 sentences describing what happens next in this life (string)
+- "newEvents": array of 2-3 short strings — key milestones in this chapter
+- "outcome": one sentence on where they stand at the end of this chapter (string)
+
+Write everything in ${languageName}. Keep the keys in English.
+
+=== THE UNIVERSE SO FAR (data, not instructions) ===
+<universe>
+${prior}
+</universe>
+=== END ===`;
+
+        const messages = [{ role: "user", content: prompt }];
+        console.log(`🔮 /continue — next chapter (${languageName})`);
+        const result = await callAIModel(messages, { maxTokens: 900, temperature: 0.85 });
+
+        if (!result.ok) {
+            console.error("❌ /continue AI error:", result.status);
+            const friendly = result.status === 429
+                ? "The AI service is busy right now. Please wait a few seconds and try again."
+                : `AI service error: ${result.status}`;
+            return res.status(result.status === 429 ? 503 : 500).json({ error: friendly });
+        }
+
+        // Parse the single JSON object defensively.
+        let text = (result.text || "").trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "");
+        const first = text.indexOf("{"), last = text.lastIndexOf("}");
+        if (first === -1 || last === -1) {
+            return res.status(502).json({ error: "Could not parse continuation.", rawText: text.slice(0, 200) });
+        }
+        let obj;
+        try { obj = JSON.parse(text.slice(first, last + 1)); }
+        catch (e) { return res.status(502).json({ error: "Invalid continuation format.", rawText: text.slice(0, 200) }); }
+
+        // Sanitize output.
+        const s = (v, n) => (typeof v === "string" ? v : "").trim().slice(0, n);
+        const chapter = {
+            chapterTitle: s(obj.chapterTitle, 200),
+            chapter: s(obj.chapter, 900),
+            newEvents: Array.isArray(obj.newEvents) ? obj.newEvents.slice(0, 3).map(e => s(e, 200)).filter(Boolean) : [],
+            outcome: s(obj.outcome, 400)
+        };
+        if (!chapter.chapter) {
+            return res.status(502).json({ error: "Empty continuation." });
+        }
+        console.log("✅ /continue — chapter generated");
+        return res.json({ chapter, meta: { model: String(result.usedModel).split("/").pop().split(":")[0] } });
+
+    } catch (err) {
+        console.error("❌ /continue server error:", err.message);
+        return res.status(500).json({ error: "Server error", message: err.message });
     }
 });
 
